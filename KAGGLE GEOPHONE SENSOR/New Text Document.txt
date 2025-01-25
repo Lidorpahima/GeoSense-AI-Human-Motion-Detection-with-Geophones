@@ -1,1 +1,0 @@
-https://www.kaggle.com/code/sezginfurkan/lstm-model-for-geophone-sensor
