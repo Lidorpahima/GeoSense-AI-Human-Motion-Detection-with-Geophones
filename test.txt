@@ -1,0 +1,607 @@
+# ==============================================================================
+# === קוד Optuna משופר למניעת Data Leakage (StratifiedGroupKFold) ===
+# === חיפוש, בחירת מודל יחיד, והערכה על נתונים חדשים ===
+# ==============================================================================
+
+# --- 1. ייבוא והגדרות ---
+print("--- Importing Libraries ---")
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from torchvision import models, transforms
+from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
+# <<< ייבוא הכרחי למניעת דליפה >>>
+from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.metrics import precision_score, recall_score, confusion_matrix, accuracy_score, classification_report
+from scipy.signal import butter, filtfilt
+import librosa
+import librosa.display
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+import glob
+import time
+import random
+from copy import deepcopy
+import cv2
+import optuna
+import joblib
+import warnings
+import torchvision
+
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+print(f"Torch version: {torch.__version__}")
+print(f"Torchvision version: {torchvision.__version__}")
+print(f"Optuna version: {optuna.__version__}")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {DEVICE}")
+
+# --- הגדרות גלובליות ---
+LABEL_MAN = 0; LABEL_CAR = 1; LABEL_NOISE = 2
+CLASS_NAMES = ["Steps", "Vehicle", "Noise"]; NUM_CLASSES = 3
+
+# פרמטרי עיבוד אות וספקטרוגרמה (ברירת מחדל, יכולים להיטען מהמודל אם נטען)
+window_size = 2000; stride = 500; fs = 1000.0; max_channels = 39
+N_MELS = 128; N_FFT = 1024; HOP_LENGTH = window_size // (N_MELS * 2) # ~8
+IMG_HEIGHT_FINAL = 224; IMG_WIDTH_FINAL = 224
+lowcut = 1.0; highcut = 100.0; order = 4
+print(f"Spectrogram Size (Target): ({IMG_HEIGHT_FINAL}, {IMG_WIDTH_FINAL})")
+
+# הגדרות K-Fold (עם Grouping) וחיפוש היפרפרמטרים
+N_SPLITS_OPT = 5        # מספר Folds
+EPOCHS_OPT = 35         # הגדל מעט מקסימום Epochs
+PATIENCE_OPT = 8        # הגדל מעט סבלנות
+BATCH_SIZE_OPT = 32
+MODEL_NAME_OPT = 'efficientnet_b0'
+# <<< הגדל זמן לחיפוש יותר מעמיק >>>
+TIMEOUT_SECONDS_OPT = 8 * 3600 # 8 שעות
+STUDY_NAME_OPT = "geophone-effnet-groupkfold-search-v1" # שם חדש ל-Study
+STUDY_FILENAME = f"{STUDY_NAME_OPT}.pkl"
+SEED_OFFSET = 500 # לקביעת random_state של KFold בכל trial
+
+# ספי דיוק לולידציה (לשמירת מודל Fold זמני והערכה על נתונים חדשים)
+# אפשר להוריד מעט את הסף כי הולידציה תהיה יותר קשה עכשיו
+MIN_VAL_ACC_THRESHOLD = 0.65
+MAX_VAL_ACC_THRESHOLD = 0.995 # שמור על סף עליון
+
+# נתיבים
+ORIGINAL_DATA_PATHS = {
+    LABEL_MAN: {'path': 'man.csv'},
+    LABEL_CAR: {'path': 'car.csv', 'args': {'skiprows': 1}},
+    LABEL_NOISE: {'path': 'nothing.csv'}
+}
+NEW_DATA_FOLDER = 'newDataSET_csv' # <<< שם התיקייה המעודכן <<<
+SAVE_PATH_BASE = f"./results_{STUDY_NAME_OPT}/" # תיקייה לשמירת תוצאות ה-Study
+BEST_MODEL_FILENAME = os.path.join(SAVE_PATH_BASE, f"BEST_MODEL_{STUDY_NAME_OPT}.pth") # שם קובץ למודל הסופי
+os.makedirs(SAVE_PATH_BASE, exist_ok=True)
+print(f"Optuna study name: {STUDY_NAME_OPT}")
+print(f"Results and best model will be saved to: {SAVE_PATH_BASE}")
+
+# סטטיסטיקות נרמול
+imagenet_mean = [0.485, 0.456, 0.406]; imagenet_std = [0.229, 0.224, 0.225]
+
+
+# --- 2. פונקציות עזר ועיבוד נתונים (עם הוספת Groups) ---
+print("\n--- Defining Helper Functions ---")
+
+def pad_channels(data, target_channels=max_channels):
+    # ... (כמו קודם) ...
+    if data.ndim == 1: data = data.reshape(-1, 1)
+    if data.shape[1] == target_channels: return data
+    elif data.shape[1] < target_channels: padding = np.zeros((data.shape[0], target_channels - data.shape[1]), dtype=data.dtype); return np.hstack((data, padding))
+    else: return data[:, :target_channels]
+
+def create_windows(signal, label, window_size=window_size, stride=stride):
+    # ... (כמו קודם) ...
+    X_windows, y_labels = [], [];
+    if signal.shape[0] < window_size: return [], []
+    for start in range(0, signal.shape[0] - window_size + 1, stride): X_windows.append(signal[start : start + window_size, :]); y_labels.append(label)
+    return X_windows, y_labels
+
+def create_mel_spectrogram(window_1d, sr=int(fs), n_fft=N_FFT, hop_length=HOP_LENGTH, n_mels=N_MELS):
+    # ... (כמו קודם, עם בדיקות) ...
+    try:
+        signal = window_1d.astype(np.float32); spec_width = int(np.floor(len(signal) / hop_length) + 1)
+        if np.all(signal == signal[0]): return None # החזר None אם אות קבוע
+        mel_spec = librosa.feature.melspectrogram(y=signal, sr=sr, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels, fmin=1.0, fmax=min(highcut*1.2, sr/2 - 1))
+        mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max); min_db, max_db = mel_spec_db.min(), mel_spec_db.max()
+        if max_db <= min_db: return None # החזר None אם אין טווח
+        mel_spec_norm = (mel_spec_db - min_db) / (max_db - min_db); current_width = mel_spec_norm.shape[1]
+        if current_width < spec_width: mel_spec_norm = np.pad(mel_spec_norm, ((0,0), (0, spec_width - current_width)), mode='constant')
+        elif current_width > spec_width: mel_spec_norm = mel_spec_norm[:, :spec_width]
+        if not np.isfinite(mel_spec_norm).all(): return None # החזר None אם יש NaN/inf
+        return mel_spec_norm.astype(np.float32)
+    except Exception as e:
+        # print(f"Debug - Error in create_mel_spectrogram: {e}") # אפשר להוסיף להדפסת שגיאות
+        return None # החזר None במקרה של שגיאה כללית
+
+# <<< פונקציית טעינה משופרת שמחזירה גם Groups >>>
+def load_data_specs_signals_and_groups(file_map, target_img_size=(IMG_HEIGHT_FINAL, IMG_WIDTH_FINAL)):
+    all_specs, all_labels, all_signals, all_groups = [], [], [], [] # הוסף רשימה ל-groups
+    try: b, a = butter(order, [lowcut/(fs/2), highcut/(fs/2)], btype='band')
+    except ValueError as e: print(f"CRITICAL FILTER ERROR: {e}. Aborting."); return [], [], [], []
+    print(f"Loading data, signals, and groups...")
+    file_count = 0; items_created_count = 0; processed_files = 0
+    group_counter = 0 # מונה לקבוצות ייחודיות
+
+    for label, info in file_map.items():
+        filepaths = info.get('path', []); extra_args = info.get('args', {})
+        if isinstance(filepaths, str): filepaths = [filepaths]
+        if not filepaths: continue
+        file_count += len(filepaths)
+        print(f"\nProcessing Label {label} ({len(filepaths)} files)...")
+
+        for filepath in filepaths:
+            processed_files += 1
+            # <<< השתמש ב-group_id ייחודי לכל קובץ >>>
+            group_id = group_counter # מזהה מספרי פשוט
+            print(f"  Processing file: {filepath} (Group ID: {group_id})...")
+            if not os.path.exists(filepath): print(f"    ERROR: File not found! Skipping."); continue
+
+            df = None; data = None; windows_created_count = 0
+            try:
+                # ... (קוד טעינת CSV ועיבוד ראשוני כמו בקוד הקודם, עם הדפסות דיבאג) ...
+                try: df = pd.read_csv(filepath, header=None, skipinitialspace=True, **extra_args)
+                except Exception: df = pd.read_csv(filepath, header=None, skiprows=1, skipinitialspace=True, **extra_args)
+                if df is None or df.empty: continue
+                df = df.dropna();
+                if df.empty: continue; data = df.values
+                if not np.issubdtype(data.dtype, np.number): data = data.astype(float)
+                if data.shape[0] < window_size or data.ndim < 2 or data.shape[1] == 0: continue
+                data_padded = pad_channels(data)
+                windows, labels_w = create_windows(data_padded, label)
+                if not windows: continue
+                windows_created_count = len(windows)
+
+                window_processed_count = 0
+                for i, w in enumerate(windows):
+                    signal_to_process = None; spec_3_channels = None
+                    try:
+                        filtered_w = filtfilt(b, a, w, axis=0); signal_to_process = filtered_w[:, 0].astype(np.float32)
+                        mel_spec_norm = create_mel_spectrogram(signal_to_process)
+                        # <<< דלג על החלון אם הספקטרוגרמה לא נוצרה >>>
+                        if mel_spec_norm is None: continue
+                        resized_spec = cv2.resize(mel_spec_norm, (target_img_size[1], target_img_size[0]), interpolation=cv2.INTER_LINEAR)
+                        spec_3_channels = np.stack([resized_spec]*3, axis=0)
+                        if not np.isfinite(spec_3_channels).all(): continue
+
+                        # --- הוסף גם את ה-group_id ---
+                        all_signals.append(signal_to_process)
+                        all_specs.append(spec_3_channels)
+                        all_labels.append(labels_w[i])
+                        all_groups.append(group_id) # הוסף את מזהה הקבוצה
+                        items_created_count += 1
+                        window_processed_count += 1
+                    except Exception as e_window: print(f"        ERROR processing window {i} from file {filepath}: {e_window}"); pass
+                print(f"    Finished processing {window_processed_count}/{windows_created_count} windows for this file.")
+
+            except Exception as e_file: print(f"    UNEXPECTED ERROR processing file {filepath}: {e_file}")
+
+            # <<< קדם את מונה הקבוצות רק אם הצלחנו לעבד את הקובץ (אפילו אם לא כל החלונות עברו) >>>
+            # שינוי קל: נקדם תמיד כדי שלכל קובץ יהיה ID ייחודי, גם אם הוא נכשל לגמרי
+            group_counter += 1
+
+
+    print(f"\nFinished loading all files. Processed {processed_files} files. Total items created: {items_created_count}")
+    if not all_specs: print("WARNING: No items were created successfully from any file.")
+    specs_np = np.array(all_specs, dtype=np.float32) if all_specs else np.array([])
+    labels_np = np.array(all_labels, dtype=np.int64) if all_labels else np.array([], dtype=np.int64)
+    signals_np = np.array(all_signals, dtype=np.float32) if all_signals else np.array([])
+    groups_np = np.array(all_groups) if all_groups else np.array([]) # המר גם את הקבוצות
+    return specs_np, labels_np, signals_np, groups_np # <<< החזר 4 ערכים >>>
+
+# הגדרת Dataset וטרנספורמציות (כמו קודם)
+class SpecAugment(nn.Module): # כמו קודם
+    def __init__(self, freq_mask_param=20, time_mask_param=40, num_freq_masks=1, num_time_masks=1):
+        super().__init__(); self.freq_mask_param = freq_mask_param; self.time_mask_param = time_mask_param
+        self.num_freq_masks = num_freq_masks; self.num_time_masks = num_time_masks
+    def forward(self, spec):
+        if not isinstance(spec, torch.Tensor): raise TypeError("Input must be a Tensor."); spec_aug = spec.clone(); _, F, T = spec_aug.shape; fm_param = min(self.freq_mask_param, F // 2); tm_param = min(self.time_mask_param, T // 2)
+        for _ in range(self.num_freq_masks):
+            if fm_param > 0: f = random.randrange(0, fm_param);
+            if F-f > 0: f0 = random.randrange(0, F - f); spec_aug[:, f0:f0+f, :] = spec.mean()
+        for _ in range(self.num_time_masks):
+             if tm_param > 0: t = random.randrange(0, tm_param);
+             if T-t > 0: t0 = random.randrange(0, T - t); spec_aug[:, :, t0:t0+t] = spec.mean()
+        return spec_aug
+val_test_transforms = transforms.Compose([ transforms.Normalize(mean=imagenet_mean, std=imagenet_std) ])
+print("Evaluation transforms defined.")
+class SpectrogramDataset(Dataset): # כמו קודם
+    def __init__(self, specs_np, labels_np, transform=None):
+        self.specs = torch.from_numpy(specs_np.astype(np.float32))
+        self.labels = torch.from_numpy(labels_np.astype(np.int64))
+        self.transform = transform
+    def __len__(self): return len(self.labels)
+    def __getitem__(self, idx):
+        spec = self.specs[idx]; label = self.labels[idx]
+        if self.transform: spec = self.transform(spec)
+        return spec, label
+
+# הגדרת מודל ופונקציות אימון/הערכה (כמו קודם)
+def setup_efficientnet_model(model_name='efficientnet_b0', pretrained=True, num_classes=NUM_CLASSES, dropout_p=0.2): # כמו קודם
+    weights = EfficientNet_B0_Weights.DEFAULT if pretrained else None; model_arch = efficientnet_b0(weights=weights)
+    num_ftrs = model_arch.classifier[1].in_features; model_arch.classifier = nn.Sequential(nn.Dropout(p=dropout_p, inplace=True), nn.Linear(num_ftrs, num_classes))
+    if pretrained:
+        for param in model_arch.features.parameters(): param.requires_grad = False
+        for param in model_arch.classifier.parameters(): param.requires_grad = True
+    model_arch = model_arch.to(DEVICE); return model_arch
+def train_epoch_effnet(model, dataloader, criterion, optimizer, device): # כמו קודם
+    model.train(); running_loss = 0.0; correct_preds = 0; total_samples = 0;
+    for inputs, labels in dataloader:
+        try: inputs, labels = inputs.to(device), labels.to(device); optimizer.zero_grad(); outputs = model(inputs); loss = criterion(outputs, labels)
+        if loss is None or torch.isnan(loss): continue; preds = outputs.max(1)[1]; loss.backward(); optimizer.step(); running_loss += loss.item() * inputs.size(0); correct_preds += (preds == labels).sum().item(); total_samples += labels.size(0)
+        except Exception as e: print(f"  Error train batch: {e}"); continue
+    if total_samples == 0: return 0.0, 0.0; return running_loss / total_samples, correct_preds / total_samples
+def evaluate_model_effnet(model, dataloader, criterion, device): # כמו קודם
+    model.eval(); running_loss = 0.0; correct_preds = 0; total_samples = 0; all_preds = []; all_labels = []
+    with torch.no_grad():
+        for inputs, labels in dataloader:
+            try: inputs, labels = inputs.to(device), labels.to(device); outputs = model(inputs); loss = criterion(outputs, labels);
+            if loss is None or torch.isnan(loss): continue; preds = outputs.max(1)[1]; running_loss += loss.item() * inputs.size(0); correct_preds += (preds == labels).sum().item(); total_samples += labels.size(0); all_preds.extend(preds.cpu().numpy()); all_labels.extend(labels.cpu().numpy())
+            except Exception as e: print(f"  Error eval batch: {e}"); continue
+    if total_samples == 0: return 0.0, 0.0, [], []; return running_loss / total_samples, correct_preds / total_samples, all_labels, all_preds
+
+# פונקציית הצגת גרפים (נצטרך אותה לניתוח בסוף)
+def plot_results_for_model(model_id, history, val_metrics, new_data_metrics, class_names=CLASS_NAMES, save_dir=None):
+    """ מציגה ושומרת גרפים עבור מודל ספציפי """
+    print(f"\n--- Plotting Results for Model ID: {model_id} ---")
+    base_filename = f"model_{str(model_id).replace(' ','_')}"
+    plot_filename_train = os.path.join(save_dir, f"{base_filename}_training_history.png") if save_dir else None
+    epochs_ran = len(history.get('val_loss', []))
+    if epochs_ran > 0: # גרפי אימון
+        epochs_range = range(1, epochs_ran + 1); fig_train, axes_train = plt.subplots(1, 2, figsize=(15, 5)); fig_train.suptitle(f'Model {model_id} Training History', fontsize=14)
+        axes_train[0].plot(epochs_range, history.get('train_loss', []), 'o-', label='Train Loss'); axes_train[0].plot(epochs_range, history.get('val_loss', []), 'o-', label='Val Loss'); axes_train[0].set_xlabel('Epochs'); axes_train[0].set_ylabel('Loss'); axes_train[0].legend(); axes_train[0].grid(True); axes_train[0].set_title('Loss vs. Epochs')
+        axes_train[1].plot(epochs_range, history.get('train_acc', []), 'o-', label='Train Acc'); axes_train[1].plot(epochs_range, history.get('val_acc', []), 'o-', label='Val Acc'); axes_train[1].set_xlabel('Epochs'); axes_train[1].set_ylabel('Accuracy'); axes_train[1].legend(); axes_train[1].grid(True); axes_train[1].set_title('Accuracy vs. Epochs'); axes_train[1].set_ylim(0, 1.05)
+        plt.tight_layout(rect=[0, 0.03, 1, 0.93]);
+        if plot_filename_train: plt.savefig(plot_filename_train); print(f"  Saved training history: {plot_filename_train}")
+        plt.show(); plt.close(fig_train)
+    else: print("  No training history to plot.")
+
+    # מטריצת בלבול ודוח - ולידציה
+    if val_metrics and 'labels' in val_metrics and 'preds' in val_metrics and len(val_metrics['labels']) > 0:
+        print("\nValidation Set Performance (Original Data - Leakage Free):")
+        try: cm_val = confusion_matrix(val_metrics['labels'], val_metrics['preds'], labels=range(NUM_CLASSES)); report_val = classification_report(val_metrics['labels'], val_metrics['preds'], target_names=class_names, labels=range(NUM_CLASSES), zero_division=0); print("CM:"); print(cm_val); print("\nReport:"); print(report_val)
+        plot_filename_cm_val = os.path.join(save_dir, f"{base_filename}_cm_validation.png") if save_dir else None; fig_cm_val, ax_cm_val = plt.subplots(figsize=(6, 5)); sns.heatmap(cm_val, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names, ax=ax_cm_val); ax_cm_val.set_title(f'Model {model_id} - Validation CM'); ax_cm_val.set_xlabel('Predicted'); ax_cm_val.set_ylabel('True'); plt.tight_layout()
+        if plot_filename_cm_val: plt.savefig(plot_filename_cm_val); print(f"  Saved validation CM: {plot_filename_cm_val}")
+        plt.show(); plt.close(fig_cm_val)
+        except Exception as e: print(f"  Error plotting validation CM/Report: {e}")
+    else: print("\nNo validation results to plot.")
+
+    # מטריצת בלבול ודוח - נתונים חדשים
+    if new_data_metrics and 'labels' in new_data_metrics and 'preds' in new_data_metrics and len(new_data_metrics['labels']) > 0:
+        print("\nTest Set Performance (Normalized Data):")
+        try: cm_new = confusion_matrix(new_data_metrics['labels'], new_data_metrics['preds'], labels=range(NUM_CLASSES)); report_new = classification_report(new_data_metrics['labels'], new_data_metrics['preds'], target_names=class_names, labels=range(NUM_CLASSES), zero_division=0); print("CM:"); print(cm_new); print("\nReport:"); print(report_new)
+        plot_filename_cm_new = os.path.join(save_dir, f"{base_filename}_cm_test_normalized.png") if save_dir else None; fig_cm_new, ax_cm_new = plt.subplots(figsize=(6, 5)); sns.heatmap(cm_new, annot=True, fmt='d', cmap='Oranges', xticklabels=class_names, yticklabels=class_names, ax=ax_cm_new); ax_cm_new.set_title(f'Model {model_id} - Test CM (Normalized)'); ax_cm_new.set_xlabel('Predicted'); ax_cm_new.set_ylabel('True'); plt.tight_layout()
+        if plot_filename_cm_new: plt.savefig(plot_filename_cm_new); print(f"  Saved test CM: {plot_filename_cm_new}")
+        plt.show(); plt.close(fig_cm_new)
+        except Exception as e: print(f"  Error plotting test CM/Report: {e}")
+    else: print("\nNo new data test results to plot.")
+
+
+# --- 3. טעינת הנתונים (פעם אחת לפני החיפוש) ---
+print("\n--- Loading ALL Data (Original and New) Before Optuna Search ---")
+# <<< טען גם את ה-groups >>>
+orig_specs_np, orig_labels_np, _, orig_groups_np = load_data_specs_signals_and_groups(ORIGINAL_DATA_PATHS)
+# טען גם נתונים חדשים (רק ספקטרוגרמות ותוויות מספיקים כאן)
+new_specs_np, new_labels_np, _, _ = load_data_specs_signals_and_groups(
+    {LABEL_MAN: {'path': glob.glob(os.path.join(NEW_DATA_FOLDER, '*.csv'))}} if glob.glob(os.path.join(NEW_DATA_FOLDER, '*.csv')) else {}
+)
+
+# בדיקה קריטית אם הנתונים המקוריים נטענו
+if orig_specs_np.size == 0 or orig_labels_np.size == 0 or orig_groups_np.size == 0:
+    print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+    print("CRITICAL ERROR: Failed to load original data or groups. Cannot proceed.")
+    print("Check file paths, formats, and data processing steps in load_data_specs_signals_and_groups.")
+    print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
+    exit()
+if new_specs_np.size == 0:
+    print("\nWarning: No new data loaded. Evaluation on new data will be skipped.")
+
+print(f"\nOriginal data shapes: Specs={orig_specs_np.shape}, Labels={orig_labels_np.shape}, Groups={orig_groups_np.shape}")
+print(f"New data shapes: Specs={new_specs_np.shape}, Labels={new_labels_np.shape}")
+print(f"Number of unique groups in original data: {len(np.unique(orig_groups_np))}")
+
+
+# --- 4. הגדרת פונקציית המטרה (Objective) ל-Optuna (עם GroupKFold) ---
+print("\n--- Defining Optuna Objective Function (with StratifiedGroupKFold) ---")
+
+def objective(trial):
+    start_trial_time = time.time()
+    print(f"\n{'='*15} Optuna Trial {trial.number} Starting {'='*15}")
+
+    # --- דגימת היפרפרמטרים ---
+    lr = trial.suggest_float("lr", 1e-4, 5e-3, log=True) # הרחב מעט טווח LR
+    dropout_p = trial.suggest_float("dropout_p", 0.2, 0.5, step=0.1) # צמצם טווח דרופאאוט
+    weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-3, log=True)
+    specaug_freq = trial.suggest_int("specaug_freq", 5, 25) # הקטן מעט טווחים
+    specaug_time = trial.suggest_int("specaug_time", 10, 50)
+    specaug_f_masks = trial.suggest_int("specaug_f_masks", 1, 2)
+    specaug_t_masks = trial.suggest_int("specaug_t_masks", 1, 2)
+
+    print(f"  Trial Params: LR={lr:.1e}, Dropout={dropout_p:.2f}, WD={weight_decay:.1e}, "
+          f"SpecAugF={specaug_freq}, SpecAugT={specaug_time}, N_F={specaug_f_masks}, N_T={specaug_t_masks}")
+
+    # --- הגדרת טרנספורמציות אימון ספציפיות ל-trial ---
+    current_train_transforms = transforms.Compose([
+        SpecAugment(freq_mask_param=specaug_freq, time_mask_param=specaug_time,
+                    num_freq_masks=specaug_f_masks, num_time_masks=specaug_t_masks),
+        transforms.Normalize(mean=imagenet_mean, std=imagenet_std)
+    ])
+
+    # --- Cross-Validation עם StratifiedGroupKFold ---
+    # <<< שימוש ב-StratifiedGroupKFold למניעת דליפה >>>
+    kfold = StratifiedGroupKFold(n_splits=N_SPLITS_OPT, shuffle=True, random_state=trial.number + SEED_OFFSET)
+    fold_val_accs = []         # לאחסון Val Acc מכל fold (עכשיו זה מדד אמין יותר)
+    fold_new_data_accs = []    # לאחסון Test Acc (נתונים חדשים) מכל fold שעמד בתנאים
+    # <<< לא נשמור כאן מודלים מלאים, רק את המידע עליהם >>>
+    qualified_fold_info_for_trial = [] # רשימה של מילונים עם תוצאות הפולדים המוצלחים
+
+    # <<< השתמש בנתונים הגלובליים שנטענו קודם >>>
+    X = orig_specs_np
+    y = orig_labels_np
+    groups = orig_groups_np
+
+    for fold, (train_ids, val_ids) in enumerate(kfold.split(X, y, groups)):
+        fold_start_time = time.time()
+        print(f"  --- Fold {fold+1}/{N_SPLITS_OPT} ---")
+        # הדפס סטטיסטיקה על הקבוצות בכל פיצול - לבדיקה
+        train_groups, val_groups = np.unique(groups[train_ids]), np.unique(groups[val_ids])
+        print(f"    Train groups: {len(train_groups)}, Val groups: {len(val_groups)}, Overlap: {len(set(train_groups) & set(val_groups))}") # צריך להיות 0
+
+        # --- הכנת נתונים ל-fold ---
+        X_train_fold, y_train_fold = X[train_ids], y[train_ids]
+        X_val_fold, y_val_fold = X[val_ids], y[val_ids]
+        train_dataset = SpectrogramDataset(X_train_fold, y_train_fold, transform=current_train_transforms)
+        val_dataset = SpectrogramDataset(X_val_fold, y_val_fold, transform=val_test_transforms)
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE_OPT, shuffle=True, num_workers=0, pin_memory=True)
+        val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE_OPT, shuffle=False, num_workers=0, pin_memory=True)
+
+        # --- הגדרת מודל, קריטריון ואופטימייזר ---
+        model = setup_efficientnet_model(model_name=MODEL_NAME_OPT, pretrained=True, num_classes=NUM_CLASSES, dropout_p=dropout_p)
+        criterion = nn.CrossEntropyLoss()
+        # אופטימיזציה רק של פרמטרי ה-classifier (אם pretrained=True)
+        params_to_optimize = model.classifier.parameters() if any(p.requires_grad for p in model.features.parameters()) == False else model.parameters()
+        optimizer = optim.AdamW(params_to_optimize, lr=lr, weight_decay=weight_decay)
+
+        # --- אימון ה-fold עם Early Stopping ---
+        best_val_acc_fold = 0.0; current_best_fold_model_state = None; epochs_no_improve = 0; best_epoch = -1
+        history_current_fold = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
+        best_fold_val_labels = []; best_fold_val_preds = []
+
+        for epoch in range(1, EPOCHS_OPT + 1):
+            train_loss, train_acc = train_epoch_effnet(model, train_loader, criterion, optimizer, device)
+            val_loss, val_acc, fold_val_labels_epoch, fold_val_preds_epoch = evaluate_model_effnet(model, val_loader, criterion, device)
+            print(f"    Epoch {epoch}/{EPOCHS_OPT} | Train Loss: {train_loss:.4f}, Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f} | Time: {time.time() - time.time():.1f}s")
+            history_current_fold['train_loss'].append(train_loss); history_current_fold['train_acc'].append(train_acc); history_current_fold['val_loss'].append(val_loss); history_current_fold['val_acc'].append(val_acc)
+            if val_acc > best_val_acc_fold:
+                best_val_acc_fold = val_acc; current_best_fold_model_state = deepcopy(model.state_dict()); epochs_no_improve = 0; best_epoch = epoch
+                best_fold_val_labels = fold_val_labels_epoch; best_fold_val_preds = fold_val_preds_epoch
+            else: epochs_no_improve += 1
+            if epochs_no_improve >= PATIENCE_OPT: print(f"    Early stopping at epoch {epoch}. Best val_acc: {best_val_acc_fold:.4f}"); break
+
+        # --- הערכה על נתונים חדשים (אם רלוונטי) ---
+        current_fold_new_data_acc = 0.0
+        fold_new_data_labels = None; fold_new_data_preds = None
+
+        if current_best_fold_model_state and new_specs_np.size > 0:
+            print(f"    Fold {fold+1} completed. Best Val Acc (Leak-Free): {best_val_acc_fold:.4f} at epoch {best_epoch}.")
+            if MIN_VAL_ACC_THRESHOLD <= best_val_acc_fold <= MAX_VAL_ACC_THRESHOLD:
+                print(f"      Val Acc within threshold. Evaluating on new data...")
+                model.load_state_dict(current_best_fold_model_state)
+                new_dataset = SpectrogramDataset(new_specs_np, new_labels_np, transform=val_test_transforms)
+                new_loader = DataLoader(new_dataset, batch_size=BATCH_SIZE_OPT, shuffle=False, num_workers=0, pin_memory=True)
+                try:
+                    new_loss, new_acc, fold_new_data_labels, fold_new_data_preds = evaluate_model_effnet(model, new_loader, criterion, device)
+                    current_fold_new_data_acc = new_acc # שמור את הדיוק על הנתונים החדשים
+                    print(f"        -> New Data Eval: Loss={new_loss:.4f}, Accuracy={current_fold_new_data_acc:.4f}")
+                    # <<< שמור מידע על ה-fold המוצלח (ללא state_dict) >>>
+                    qualified_fold_info_for_trial.append({
+                        'fold': fold + 1,
+                        'val_acc': best_val_acc_fold,
+                        'new_acc': current_fold_new_data_acc,
+                        'epoch': best_epoch,
+                        # 'state_dict': current_best_fold_model_state, # <<< לא שומרים כאן! >>>
+                        'history': history_current_fold,
+                        'val_labels': best_fold_val_labels, 'val_preds': best_fold_val_preds,
+                        'new_labels': fold_new_data_labels, 'new_preds': fold_new_data_preds,
+                    })
+                except Exception as e_eval_new: print(f"        ERROR during new data evaluation: {e_eval_new}")
+            else: print(f"      Val Acc outside threshold. Skipping new data evaluation.")
+        elif new_specs_np.size == 0: print(f"    No new data loaded. Skipping new data evaluation.")
+        else: print(f"    No best model state found for fold {fold+1}. Skipping new data evaluation.")
+
+        fold_val_accs.append(best_val_acc_fold) # שמור תמיד את ה-Val Acc (האמין)
+        fold_new_data_accs.append(current_fold_new_data_acc) # שמור 0 אם לא הוערך
+
+        # --- דיווח ל-Optuna ובדיקת Pruning ---
+        # דווח על המדד המשני (Val Acc) כדי לאפשר Pruning מוקדם
+        trial.report(best_val_acc_fold, fold)
+        if trial.should_prune(): print("  Trial pruned based on validation accuracy."); raise optuna.exceptions.TrialPruned()
+        print(f"  --- Fold {fold+1} Finished. Time: {time.time() - fold_start_time:.1f}s ---")
+
+    # --- חישוב תוצאה סופית ל-Trial ---
+    average_val_acc = np.mean(fold_val_accs) if fold_val_accs else 0.0
+    # <<< המדד שרוצים למקסם: ממוצע הדיוק על הנתונים החדשים (מהפולדים שעמדו בתנאי) >>>
+    qualified_new_accs = [f['new_acc'] for f in qualified_fold_info_for_trial]
+    average_acc_new_data = np.mean(qualified_new_accs) if qualified_new_accs else 0.0
+
+    print(f"\n--- Finished Trial {trial.number} ---")
+    print(f"  Avg Val Acc (Leak-Free): {average_val_acc:.4f}")
+    print(f"  Avg Test Acc (Normalized Data, qualified folds only): {average_acc_new_data:.4f}")
+    print(f"  Total Trial Time: {time.time() - start_trial_time:.1f}s")
+    print(f"{'='*40}")
+
+    # --- שמירת מידע על ה-Trial ב-User Attributes ---
+    if average_acc_new_data > 0 and qualified_fold_info_for_trial:
+        trial_summary = {
+            'trial_num': trial.number, 'params': trial.params,
+            'avg_val_acc': average_val_acc, 'avg_test_acc_new': average_acc_new_data,
+            'qualified_folds_metrics': [{'fold': f['fold'], 'val_acc': f['val_acc'], 'new_acc': f['new_acc']} for f in qualified_fold_info_for_trial]
+        }
+        # <<< שמור את התוצאות המלאות של הפולדים (כולל הכל חוץ מ-state_dict) >>>
+        trial.set_user_attr("trial_summary", trial_summary)
+        trial.set_user_attr("qualified_fold_results", qualified_fold_info_for_trial)
+
+        # --- חשוב: שמור את ה-state_dict של המודל הטוב ביותר *מה-trial הזה* בנפרד ---
+        # בחר את ה-fold הכי טוב *בתוך ה-trial הנוכחי* לפי הקריטריון שקבענו
+        qualified_fold_info_for_trial.sort(key=lambda x: (-x['val_acc'], -x['new_acc'])) # קודם Val Acc גבוה
+        best_fold_in_trial = qualified_fold_info_for_trial[0]
+        # טען מחדש את המצב הטוב ביותר מה-fold הזה
+        model.load_state_dict(best_fold_in_trial['state_dict'])
+        # שמור את ה-state_dict ב-user_attr נוסף
+        trial.set_user_attr("best_fold_state_dict", deepcopy(best_fold_in_trial['state_dict'])) # שמור עותק עמוק
+        trial.set_user_attr("best_fold_num_in_trial", best_fold_in_trial['fold'])
+
+
+    # <<< החזר את המדד הראשי למקסום >>>
+    return average_acc_new_data
+
+
+# --- 5. הרצת החיפוש עם Optuna ---
+print("\n--- Starting Optuna Hyperparameter Optimization ---")
+study = None
+try:
+    study = joblib.load(STUDY_FILENAME)
+    print(f"Loaded existing Optuna study '{STUDY_NAME_OPT}' from {STUDY_FILENAME}")
+except FileNotFoundError:
+    print(f"Creating new study '{STUDY_NAME_OPT}'...")
+    study = optuna.create_study(study_name=STUDY_NAME_OPT, direction="maximize") # מקסום Test Acc
+except Exception as e_load:
+    print(f"Error loading study: {e_load}. Creating a new one.")
+    study = optuna.create_study(study_name=STUDY_NAME_OPT, direction="maximize")
+
+# Callback לשמירת ה-study
+save_callback = lambda study, trial: joblib.dump(study, STUDY_FILENAME)
+print(f"Study will be saved to {STUDY_FILENAME} periodically.")
+
+# הרצת האופטימיזציה
+try:
+    print(f"Starting optimization run for max {TIMEOUT_SECONDS_OPT / 3600:.1f} hours...")
+    study.optimize( objective, timeout=TIMEOUT_SECONDS_OPT, callbacks=[save_callback], gc_after_trial=True )
+except KeyboardInterrupt: print("\nOptimization interrupted by user.")
+except Exception as e_optimize: print(f"\nAn error occurred during optimization: {e_optimize}")
+finally:
+    # שמור את ה-study בסוף בכל מקרה
+    print("Saving final study state...")
+    try: joblib.dump(study, STUDY_FILENAME); print("Study saved.")
+    except Exception as e_save: print(f"Could not save final study state: {e_save}")
+
+
+# --- 6. ניתוח התוצאות ושמירת המודל הטוב ביותר ---
+print("\n--- Optimization Finished ---")
+print(f"Number of finished trials in study: {len(study.trials)}")
+
+best_trial_overall = None
+try:
+    # קבל את ה-trial עם הערך הגבוה ביותר של המדד שהוגדר (average_acc_new_data)
+    best_trial_overall = study.best_trial
+    print(f"\nBest trial found by Optuna: #{best_trial_overall.number}")
+    print(f"  Value (Avg Test Acc Normalized): {best_trial_overall.value:.4f}")
+    print(f"  Params: {best_trial_overall.params}")
+
+    # --- קבל את המידע המלא מה-User Attributes של ה-Trial הטוב ביותר ---
+    best_trial_summary = best_trial_overall.user_attrs.get("trial_summary")
+    best_fold_state_dict = best_trial_overall.user_attrs.get("best_fold_state_dict")
+    best_fold_results_full = None
+    best_fold_num = best_trial_overall.user_attrs.get("best_fold_num_in_trial")
+
+    # מצא את התוצאות המלאות של ה-fold הספציפי הזה מתוך ה-trial
+    qualified_folds_in_best_trial = best_trial_overall.user_attrs.get("qualified_fold_results", [])
+    for fold_info in qualified_folds_in_best_trial:
+        if fold_info['fold'] == best_fold_num:
+            best_fold_results_full = fold_info
+            break
+
+    if best_trial_summary:
+         print("\n  Summary of the Best Trial:")
+         print(f"    Avg Val Acc (Leak-Free): {best_trial_summary.get('avg_val_acc', 'N/A'):.4f}")
+         # הדפס פרטי הפולדים שעמדו בתנאי ב-trial הטוב ביותר
+         print("    Qualified Folds in this Trial:")
+         for fm in best_trial_summary.get('qualified_folds_metrics',[]):
+              print(f"      - Fold {fm['fold']}: ValAcc={fm['val_acc']:.4f}, TestAcc={fm['new_acc']:.4f}")
+
+    # --- שמירת המודל הטוב ביותר שנבחר ---
+    if best_fold_state_dict and best_fold_results_full:
+        print(f"\n--- Saving the Best Performing Fold (Fold {best_fold_num}) from the Best Trial ({best_trial_overall.number}) ---")
+        print(f"Saving to: {BEST_MODEL_FILENAME}")
+        try:
+            save_data = {
+                'model_state_dict': best_fold_state_dict,
+                'trial_number': best_trial_overall.number,
+                'fold': best_fold_results_full['fold'],
+                'epoch': best_fold_results_full['epoch'],
+                'val_acc': best_fold_results_full['val_acc'],
+                'test_acc_normalized': best_fold_results_full['new_acc'],
+                'model_name': MODEL_NAME_OPT,
+                'hyperparameters': best_trial_overall.params, # פרמטרים של ה-trial הטוב ביותר
+                'imagenet_mean': imagenet_mean, 'imagenet_std': imagenet_std,
+                'class_names': CLASS_NAMES,
+                # פרמטרי עיבוד חשובים
+                'N_MELS': N_MELS, 'N_FFT': N_FFT, 'HOP_LENGTH': HOP_LENGTH,
+                'IMG_HEIGHT_FINAL': IMG_HEIGHT_FINAL, 'IMG_WIDTH_FINAL': IMG_WIDTH_FINAL,
+                'window_size': window_size, 'stride': stride, 'fs': fs,
+                'lowcut': lowcut, 'highcut': highcut, 'order': order,
+                # אפשר להוסיף גם את ה-random_state של ה-KFold לשיחזור
+                'kfold_random_state': best_trial_overall.number + SEED_OFFSET
+            }
+            torch.save(save_data, BEST_MODEL_FILENAME)
+            print("  Best model saved successfully.")
+
+            # שמור גם קובץ טקסט עם סיכום
+            summary_txt_filename = os.path.join(SAVE_PATH_BASE, f"BEST_MODEL_summary_{STUDY_NAME_OPT}.txt")
+            with open(summary_txt_filename, 'w') as f:
+                 f.write(f"Best Model Summary from Optuna Study: {STUDY_NAME_OPT}\n")
+                 f.write(f"Selected from Best Trial: #{best_trial_overall.number}\n")
+                 f.write(f"Originating Fold: {best_fold_results_full['fold']}\n")
+                 f.write(f"Best Epoch in Fold: {best_fold_results_full['epoch']}\n")
+                 f.write("\nHyperparameters:\n")
+                 for k,v in best_trial_overall.params.items(): f.write(f"  {k}: {v}\n")
+                 f.write("\nPerformance Metrics:\n")
+                 f.write(f"  Validation Accuracy (Leak-Free, Best Fold): {best_fold_results_full['val_acc']:.4f}\n")
+                 f.write(f"  Test Accuracy (Normalized Data, Best Fold): {best_fold_results_full['new_acc']:.4f}\n")
+                 if best_trial_summary: f.write(f"  Average Validation Accuracy (Best Trial): {best_trial_summary.get('avg_val_acc', 'N/A'):.4f}\n")
+                 if best_trial_summary: f.write(f"  Average Test Accuracy (Best Trial, Qualified Folds): {best_trial_summary.get('avg_test_acc_new', 'N/A'):.4f}\n")
+            print(f"  Summary saved to: {summary_txt_filename}")
+
+            # --- הפקת גרפים עבור המודל הטוב ביותר שנשמר ---
+            print("\n--- Generating Plots for the Saved Best Model ---")
+            plot_results_for_model(
+                model_id=f"Best (Trial {best_trial_overall.number}, Fold {best_fold_num})",
+                history=best_fold_results_full['history'],
+                val_metrics={'labels': best_fold_results_full['val_labels'], 'preds': best_fold_results_full['val_preds']},
+                new_data_metrics={'labels': best_fold_results_full['new_labels'], 'preds': best_fold_results_full['new_preds']},
+                class_names=CLASS_NAMES,
+                save_dir=SAVE_PATH_BASE # שמור בתיקייה הראשית של התוצאות
+            )
+
+        except Exception as e_save_analyze:
+            print(f"  ERROR saving best model or generating its plots: {e_save_analyze}")
+    else:
+        print("\nCould not retrieve detailed results or state_dict for the best trial. Cannot save the final model.")
+
+except ValueError: print("\nNo completed trials found in the study.")
+except Exception as e_best: print(f"An error occurred during final analysis: {e_best}")
+
+
+# --- הצגת גרפי Optuna (אופציונלי) ---
+if len(study.trials) > 1:
+    print("\n--- Generating Optuna Study Plots ---")
+    try:
+        fig_hist = optuna.visualization.plot_optimization_history(study)
+        fig_hist.write_image(os.path.join(SAVE_PATH_BASE, f"{STUDY_NAME_OPT}_optimization_history.png"))
+        print("  Saved optimization history plot.")
+        fig_imp = optuna.visualization.plot_param_importances(study)
+        fig_imp.write_image(os.path.join(SAVE_PATH_BASE, f"{STUDY_NAME_OPT}_param_importances.png"))
+        print("  Saved parameter importances plot.")
+        # אפשר להוסיף עוד גרפים כמו plot_slice, plot_parallel_coordinate
+        # fig_hist.show() # בטל תגובה אם רוצה לראות אינטראקטיבית
+        # fig_imp.show()
+    except ImportError: print("  Install plotly and kaleido (pip install plotly kaleido) to generate Optuna plots.")
+    except Exception as e_plotly: print(f"  Could not generate Optuna plots: {e_plotly}")
+
+print("\n--- Full Script Finished ---")
