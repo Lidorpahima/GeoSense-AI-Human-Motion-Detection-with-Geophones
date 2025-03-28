@@ -1,0 +1,15 @@
+Hyperparameters used for the best model (from Trial 843):
+  lr: 0.0001427629680371007
+  dropout_p: 0.30000000000000004
+  weight_decay: 0.0007606531254645368
+  specaug_freq: 10
+  specaug_time: 20
+  specaug_f_masks: 3
+  specaug_t_masks: 1
+
+Performance Metrics of the Saved Model:
+  Originating Fold: 2
+  Best Epoch: 18
+  Validation Accuracy (Original Data): 0.9655
+  New Data Accuracy (Overall): 0.8802
+  New Data Recall (Steps): 0.8802
