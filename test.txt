@@ -1,6 +1,6 @@
 # =====================================================================================
-# קוד מלא, מתוקן סופית v1:
-# זיהוי צעדים / רכבים / שקט באמצעות מודל היברידי (MobileNetV3+MLP)
+# קוד מלא, מתוקן סופית v1 על EfficientNetB0:
+# זיהוי צעדים / רכבים / שקט באמצעות מודל היברידי (EfficientNetB0+MLP)
 # חיפוש היפר-פרמטרים עם Optuna (GroupKFold מבוסס קבצים)
 # =====================================================================================
 
@@ -12,7 +12,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, Subset
 from torchvision import transforms
-from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
+# כאן נייבא EfficientNetB0:
+from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
 from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, recall_score, confusion_matrix, classification_report
@@ -43,10 +44,10 @@ CLASS_NAMES    = ["Steps", "Vehicle", "Noise"]
 NUM_CLASSES    = 3
 
 # הגדרות עיבוד אות
-window_size    = 2000   # יש לעדכן בהתאם לאורך ההקלטות (ב-milliseconds)
+window_size    = 2000   # מילישניות
 stride         = 500
 fs             = 1000.0
-max_channels   = 37      # מספר הסנסורים שלך
+max_channels   = 37
 
 # הגדרות STFT
 N_FFT          = 512
@@ -67,7 +68,7 @@ N_SPLITS       = 5
 EPOCHS         = 30
 PATIENCE       = 8
 BATCH_SIZE     = 32
-TIMEOUT_SECONDS = 1 * 900  # לדוגמה: 900 שניות (15 דקות)
+TIMEOUT_SECONDS = 900   # לדוגמה: 900 שניות
 TOP_N_MODELS   = 5
 MIN_VAL_ACC_THRESHOLD = 0.80
 
@@ -80,7 +81,7 @@ ORIGINAL_DATA_PATHS = {
     LABEL_VEHICLE: {'path': ['car.csv', 'car2.csv']},
     LABEL_NOISE:   {'path': ['nothing.csv', 'nothing2.csv']}
 }
-NEW_DATA_FOLDER   = 'newDataSET_csv'   # תיקייה לדאטהסט חיצוני
+NEW_DATA_FOLDER   = 'newDataSET_csv'
 NEW_DATA_PATTERN  = '*.csv'
 
 # נתיב לשמירת המודלים
@@ -110,7 +111,6 @@ def create_stft_spectrogram(signal_1d, sr=fs, n_fft=N_FFT, hop_length=HOP_LENGTH
     try:
         signal_float = signal_1d.astype(np.float32)
         f, t, Sxx = spectrogram(signal_float, fs=sr, nperseg=n_fft, noverlap=n_fft - hop_length, nfft=n_fft)
-        # הגבלת תדר עד highcut
         freq_idx = np.where(f <= highcut)[0]
         if len(freq_idx) == 0:
             return None
@@ -171,13 +171,12 @@ def load_data_hybrid_by_file(file_map, target_img_size=(IMG_HEIGHT, IMG_WIDTH)):
                 for w in windows:
                     try:
                         filtered_w = filtfilt(b, a, w, axis=0)
-                        # בוחרים את הערוץ הראשון
                         signal_to_process = filtered_w[:, 0]
                         spec = create_stft_spectrogram(signal_to_process)
                         if spec is None:
                             continue
                         resized_spec = cv2.resize(spec, (target_img_size[1], target_img_size[0]), interpolation=cv2.INTER_LINEAR)
-                        spec_3ch = np.stack([resized_spec]*3, axis=0)  # צורת (3, H, W)
+                        spec_3ch = np.stack([resized_spec]*3, axis=0)
                         stat_feats = extract_statistical_features(signal_to_process)
                         all_specs.append(spec_3ch)
                         all_stat_features.append(stat_feats)
@@ -261,22 +260,25 @@ class HybridDataset(Dataset):
         stat_tensor = torch.tensor(stat_feat, dtype=torch.float32)
         return spec_tensor, stat_tensor, label
 
-# --- 5. הגדרת המודל ההיברידי ---
+# --- 5. הגדרת המודל ההיברידי על EfficientNetB0 ---
 import torch.nn.functional as F
 
-class HybridGeoModel(nn.Module):
+class HybridGeoModelEffB0(nn.Module):
     def __init__(self, dropout_p=0.4, stat_feature_dim=64, combined_dim=128):
-        super(HybridGeoModel, self).__init__()
-        weights = MobileNet_V3_Small_Weights.DEFAULT
-        self.cnn_backbone = mobilenet_v3_small(weights=weights)
-        # Get the output channels of the last conv layer – adjust as needed
-        cnn_out_features = self.cnn_backbone.features[-1][0].out_channels
+        super(HybridGeoModelEffB0, self).__init__()
+        # טוענים את EfficientNetB0 עם המשקולות המוגדרות כברירת מחדל
+        self.cnn_backbone = efficientnet_b0(weights=EfficientNet_B0_Weights.DEFAULT)
+        # הדפסת המודל (ל-debug) – אפשר לראות את המבנה
+        print(f"[DEBUG] EfficientNetB0 classifier: {self.cnn_backbone.classifier}")
+        # קבלת מספר הנוירונים מהשכבה הלינארית האחרונה
+        cnn_out_features = self.cnn_backbone.classifier[1].in_features
         print(f"[DEBUG] cnn_out_features: {cnn_out_features}")
+        # החלפת ה-classifier ב-Identity כך שהפלט יהיה וקטור תכונות
         self.cnn_backbone.classifier = nn.Identity()
-        # Freeze weights in features
+        # הקפאת חלק ממשקולות ה-features אם נדרש
         for param in self.cnn_backbone.features.parameters():
             param.requires_grad = False
-        # MLP for statistical features
+        # MLP לתכונות סטטיסטיות (כמו קודם)
         self.stat_mlp = nn.Sequential(
             nn.LayerNorm(NUM_STAT_FEATURES),
             nn.Linear(NUM_STAT_FEATURES, stat_feature_dim * 2),
@@ -285,13 +287,14 @@ class HybridGeoModel(nn.Module):
             nn.Linear(stat_feature_dim * 2, stat_feature_dim),
             nn.ReLU()
         )
-        # Combine features
+        # שכבות שילוב
         self.dropout = nn.Dropout(dropout_p)
         self.fc_combined = nn.Linear(cnn_out_features + stat_feature_dim, combined_dim)
         self.fc_output = nn.Linear(combined_dim, NUM_CLASSES)
     
     def forward(self, spec_input, stat_input):
-        cnn_features = self.cnn_backbone(spec_input)
+        # spec_input אמור להיות (batch_size, 3, 224, 224)
+        cnn_features = self.cnn_backbone(spec_input)  # צפוי להיות (batch_size, 1280)
         stat_features = self.stat_mlp(stat_input)
         combined = torch.cat((cnn_features, stat_features), dim=1)
         x = self.dropout(combined)
@@ -300,7 +303,7 @@ class HybridGeoModel(nn.Module):
         output = self.fc_output(x)
         return output
 
-# --- 6. פונקציות אימון והערכה ---
+# --- 6. פונקציות אימון והערכה (כמו קודם) ---
 def train_epoch_hybrid(model, dataloader, criterion, optimizer, device):
     model.train()
     running_loss = 0.0
@@ -366,7 +369,7 @@ def plot_fold_results(title, history, true_labels, pred_labels, new_true_labels=
     plt.savefig(f"{title}_training_history.png")
     plt.show()
     
-    # Plot confusion matrix for validation data
+    # Confusion matrix for validation
     cm = confusion_matrix(true_labels, pred_labels)
     plt.figure(figsize=(6,5))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES)
@@ -376,7 +379,7 @@ def plot_fold_results(title, history, true_labels, pred_labels, new_true_labels=
     plt.savefig(f"{title}_val_cm.png")
     plt.show()
     
-    # Plot confusion matrix for new dataset if provided
+    # Confusion matrix for new dataset if provided
     if new_true_labels is not None and new_pred_labels is not None:
         cm_new = confusion_matrix(new_true_labels, new_pred_labels)
         plt.figure(figsize=(6,5))
@@ -388,7 +391,7 @@ def plot_fold_results(title, history, true_labels, pred_labels, new_true_labels=
         plt.show()
 
 # --- 7. פונקציית מטרה לאופטונה (עם GroupKFold) ---
-STUDY_NAME = "hybrid_model_optuna"
+STUDY_NAME = "hybrid_model_effb0_optuna"
 STUDY_FILENAME = f"{STUDY_NAME}.pkl"
 try:
     study = joblib.load(STUDY_FILENAME)
@@ -415,14 +418,12 @@ def objective(trial):
     
     print(f"Params: lr={lr:.1e}, dropout={dropout_p}, wd={weight_decay:.1e}, stat_dim={stat_dim}, comb_dim={comb_dim}")
     
-    # עדכון טרנספורמציות האימון לפי הפרמטרים
     current_train_transforms = transforms.Compose([
         SpecAugment(freq_mask_param=specaug_freq, time_mask_param=specaug_time,
                     num_freq_masks=specaug_f_masks, num_time_masks=specaug_t_masks),
         transforms.Normalize(mean=imagenet_mean, std=imagenet_std)
     ])
     
-    # שימוש ב-GroupKFold (מניעת Data Leakage לפי קובץ)
     gkf = GroupKFold(n_splits=N_SPLITS)
     fold_val_accs = []
     fold_recalls  = []
@@ -430,7 +431,6 @@ def objective(trial):
     
     for fold, (train_idx, val_idx) in enumerate(gkf.split(orig_specs, orig_labels, groups=orig_groups)):
         print(f"  Fold {fold+1}/{N_SPLITS}")
-        # חלוקת נתונים לפי אינדקסים
         X_spec_train = orig_specs[train_idx]
         X_stat_train = orig_stat_feats[train_idx]
         y_train      = orig_labels[train_idx]
@@ -438,19 +438,17 @@ def objective(trial):
         X_stat_val   = orig_stat_feats[val_idx]
         y_val        = orig_labels[val_idx]
         
-        # נרמול התכונות הסטטיסטיות
         scaler = StandardScaler()
         X_stat_train = scaler.fit_transform(X_stat_train)
         X_stat_val   = scaler.transform(X_stat_val)
         
-        # יצירת דאטהסטים
         train_dataset = HybridDataset(X_spec_train, X_stat_train, y_train, transform=current_train_transforms)
         val_dataset   = HybridDataset(X_spec_val, X_stat_val, y_val, transform=val_transforms)
         train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
         val_loader   = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
         
-        # הגדרת המודל
-        model = HybridGeoModel(dropout_p=dropout_p, stat_feature_dim=stat_dim, combined_dim=comb_dim).to(device)
+        # Instantiate the EfficientNetB0-based model:
+        model = HybridGeoModelEffB0(dropout_p=dropout_p, stat_feature_dim=stat_dim, combined_dim=comb_dim).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=lr, weight_decay=weight_decay)
         
@@ -479,7 +477,6 @@ def objective(trial):
                 break
         fold_val_accs.append(best_val_acc)
         
-        # הערכת המודל על דאטה חדש אם קיים
         new_data_recall = 0.0
         new_true = None
         new_pred = None
@@ -490,10 +487,8 @@ def objective(trial):
             _, _, new_true, new_pred = evaluate_model_hybrid(model, new_loader, criterion, device)
             new_data_recall = recall_score(new_true, new_pred, average='macro', zero_division=0)
             print(f"    New data recall: {new_data_recall:.4f}")
-        
         fold_recalls.append(new_data_recall)
         
-        # הוספת מודל ל-fold_best_models רק אם ביצועי הדאטה החדש עומדים בסף
         if new_data_recall >= NEW_RECALL_THRESHOLD:
             fold_best_models.append({
                 'fold': fold+1,
@@ -552,7 +547,6 @@ if fold_models:
             'scaler': model_info['scaler']
         }, model_filename)
         print(f"Saved model for fold {fold_num} to {model_filename}")
-        # Plot and save graphs: validation history and, if available, new dataset confusion matrix.
         plot_fold_results(f"Trial{best_trial.number}_Fold{fold_num}",
                           model_info['history'],
                           model_info['val_labels'],
