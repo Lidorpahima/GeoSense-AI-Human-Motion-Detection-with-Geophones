@@ -1,191 +1,1894 @@
-# === קוד חדש ונפרד להדגמת השפעת הסינון ===
+Using device: cuda
 
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.signal import butter, filtfilt
-from sklearn.impute import SimpleImputer
-import os
-import warnings
+=== Loading Original Dataset ===
+Loading data by file and extracting hybrid features...
+Total samples loaded: 357
 
-warnings.filterwarnings("ignore")
+=== Loading New External Dataset ===
+Loading data by file and extracting hybrid features...
+Total samples loaded: 6018
+Loaded existing study: hybrid_model_efficientnetb0_optuna
 
-print("--- Visualization Script for Filter Effects ---")
+======================================================================
+Starting Optuna Trial #1 at Sat Mar 29 20:28:09 2025
+======================================================================
+Chosen hyperparams: lr=2.3e-03, dropout=0.6, wd=8.7e-04, stat_dim=64, comb_dim=256, freq_mask=30, time_mask=48, freq_masks=1, time_masks=2
 
-# =====================================================================================
-# =                             הגדרות (מועתקות מהקוד הראשי)                           =
-# =====================================================================================
-# פרמטרים לעיבוד אות
-window_size    = 2000  # ב-milliseconds (גודל החלון לדוגמה)
-fs             = 1000.0 # קצב דגימה ב-Hz
-max_channels   = 37     # מספר ערוצים מקסימלי (לצורך ריפוד)
-channel_to_plot = 0     # אינדקס הערוץ להדגמה (0 הוא הראשון)
+  >>> Fold 1/5 <<<
+    Original train samples: 200
+    Train samples after SMOTE: 261
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.5939, ValAcc=0.0000, ValLoss=6.8838
+    Epoch 02: TrainAcc=0.7318, ValAcc=0.0000, ValLoss=2.1554
+    Epoch 03: TrainAcc=0.7931, ValAcc=0.0000, ValLoss=2.4309
+    Epoch 04: TrainAcc=0.8314, ValAcc=0.0000, ValLoss=4.0410
+    Epoch 05: TrainAcc=0.8812, ValAcc=0.0000, ValLoss=5.0058
+    Epoch 06: TrainAcc=0.9502, ValAcc=0.0955, ValLoss=3.6241
+    Epoch 07: TrainAcc=0.9732, ValAcc=0.0701, ValLoss=6.1895
+    Epoch 08: TrainAcc=0.9770, ValAcc=0.0573, ValLoss=8.3988
+    Epoch 09: TrainAcc=0.9847, ValAcc=0.0510, ValLoss=9.5550
+    Epoch 10: TrainAcc=0.9962, ValAcc=0.0764, ValLoss=9.8433
+    Epoch 11: TrainAcc=0.9962, ValAcc=0.0701, ValLoss=10.3243
+    Epoch 12: TrainAcc=0.9962, ValAcc=0.1019, ValLoss=10.0440
+    Epoch 13: TrainAcc=0.9923, ValAcc=0.0573, ValLoss=11.2252
+    Epoch 14: TrainAcc=0.9923, ValAcc=0.0955, ValLoss=10.2574
+    Epoch 15: TrainAcc=0.9923, ValAcc=0.0828, ValLoss=10.4982
+    Epoch 16: TrainAcc=1.0000, ValAcc=0.0637, ValLoss=11.4725
+    Epoch 17: TrainAcc=0.9923, ValAcc=0.0573, ValLoss=12.5230
+    Epoch 18: TrainAcc=1.0000, ValAcc=0.0446, ValLoss=13.3090
+    Epoch 19: TrainAcc=0.9885, ValAcc=0.0573, ValLoss=12.5226
+    Epoch 20: TrainAcc=1.0000, ValAcc=0.0637, ValLoss=11.8713
+    Epoch 21: TrainAcc=1.0000, ValAcc=0.0701, ValLoss=11.5695
+    Epoch 22: TrainAcc=0.9962, ValAcc=0.0701, ValLoss=11.6782
+    Early stopping triggered.
+ FOld 1 : Val ACC 0.0000 is below threshold 0.80. Skipping new data evaluation.
 
-# פרמטרים למסנן Butterworth
-lowcut         = 1.0    # Hz
-highcut        = 100.0  # Hz
-order          = 4
+  >>> Fold 2/5 <<<
+    Original train samples: 292
+    Train samples after SMOTE: 410
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.5244, ValAcc=0.0000, ValLoss=6.7471
+    Epoch 02: TrainAcc=0.7098, ValAcc=0.0000, ValLoss=5.6462
+    Epoch 03: TrainAcc=0.7927, ValAcc=0.0000, ValLoss=9.7240
+    Epoch 04: TrainAcc=0.8585, ValAcc=0.0000, ValLoss=21.4485
+    Epoch 05: TrainAcc=0.8927, ValAcc=0.0000, ValLoss=19.7846
+    Epoch 06: TrainAcc=0.8927, ValAcc=0.0000, ValLoss=22.1010
+    Epoch 07: TrainAcc=0.9098, ValAcc=0.0000, ValLoss=26.7241
+    Epoch 08: TrainAcc=0.8951, ValAcc=0.0000, ValLoss=25.6369
+    Epoch 09: TrainAcc=0.9049, ValAcc=0.0000, ValLoss=28.6266
+    Epoch 10: TrainAcc=0.8976, ValAcc=0.0000, ValLoss=32.0428
+    Epoch 11: TrainAcc=0.9244, ValAcc=0.0000, ValLoss=35.5130
+    Epoch 12: TrainAcc=0.8976, ValAcc=0.0000, ValLoss=37.8319
+    Epoch 13: TrainAcc=0.9049, ValAcc=0.0000, ValLoss=42.6939
+    Epoch 14: TrainAcc=0.9049, ValAcc=0.0000, ValLoss=40.8686
+    Epoch 15: TrainAcc=0.9268, ValAcc=0.0000, ValLoss=44.1407
+    Epoch 16: TrainAcc=0.9220, ValAcc=0.0000, ValLoss=45.4395
+    Epoch 17: TrainAcc=0.9317, ValAcc=0.0000, ValLoss=46.1077
+    Epoch 18: TrainAcc=0.9195, ValAcc=0.0000, ValLoss=49.9915
+    Epoch 19: TrainAcc=0.9268, ValAcc=0.0000, ValLoss=53.1587
+    Epoch 20: TrainAcc=0.9195, ValAcc=0.0000, ValLoss=52.6417
+    Epoch 21: TrainAcc=0.9585, ValAcc=0.0000, ValLoss=52.4951
+    Epoch 22: TrainAcc=0.9293, ValAcc=0.0000, ValLoss=56.1614
+    Early stopping triggered.
+ FOld 2 : Val ACC 0.0000 is below threshold 0.80. Skipping new data evaluation.
 
-# נתיבים לקבצי הדוגמה (יש לוודא שהם נכונים בסביבה הנוכחית)
-# יש לוודא שהקבצים man.csv, car.csv, nothing.csv נמצאים באותה תיקייה
-# או לספק את הנתיב המלא אליהם.
-ORIGINAL_DATA_PATHS = {
-    0: {'path': ['man.csv']},           # LABEL_STEPS
-    1: {'path': ['car.csv']},           # LABEL_VEHICLE (ניקח רק את הראשון לדוגמה)
-    2: {'path': ['nothing.csv']}        # LABEL_NOISE (ניקח רק את הראשון לדוגמה)
-}
-CLASS_NAMES    = ["Steps (man.csv)", "Vehicle (car.csv)", "Noise (nothing.csv)"] # שמות לייצוג
+  >>> Fold 3/5 <<<
+    Original train samples: 300
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.5122, ValAcc=1.0000, ValLoss=0.3435
+    Epoch 02: TrainAcc=0.7772, ValAcc=0.7895, ValLoss=0.3745
+    Epoch 03: TrainAcc=0.9106, ValAcc=0.7719, ValLoss=0.3562
+    Epoch 04: TrainAcc=0.9301, ValAcc=0.4386, ValLoss=1.3792
+    Epoch 05: TrainAcc=0.9496, ValAcc=0.2982, ValLoss=2.9395
+    Epoch 06: TrainAcc=0.9528, ValAcc=0.3860, ValLoss=2.3855
+    Epoch 07: TrainAcc=0.9512, ValAcc=0.2982, ValLoss=2.8918
+    Epoch 08: TrainAcc=0.9431, ValAcc=0.2807, ValLoss=3.3927
+    Epoch 09: TrainAcc=0.9610, ValAcc=0.2807, ValLoss=4.1004
+    Epoch 10: TrainAcc=0.9675, ValAcc=0.2807, ValLoss=5.7072
+    Epoch 11: TrainAcc=0.9642, ValAcc=0.2807, ValLoss=5.8600
+    Epoch 12: TrainAcc=0.9577, ValAcc=0.3158, ValLoss=5.7939
+    Epoch 13: TrainAcc=0.9642, ValAcc=0.2807, ValLoss=6.9455
+    Epoch 14: TrainAcc=0.9642, ValAcc=0.2982, ValLoss=7.0513
+    Epoch 15: TrainAcc=0.9593, ValAcc=0.2982, ValLoss=6.8247
+    Epoch 16: TrainAcc=0.9642, ValAcc=0.3333, ValLoss=6.4969
+    Epoch 17: TrainAcc=0.9675, ValAcc=0.3333, ValLoss=6.6401
+    Epoch 18: TrainAcc=0.9707, ValAcc=0.2982, ValLoss=8.7578
+    Epoch 19: TrainAcc=0.9642, ValAcc=0.2982, ValLoss=8.4041
+    Epoch 20: TrainAcc=0.9626, ValAcc=0.2807, ValLoss=10.3604
+    Epoch 21: TrainAcc=0.9675, ValAcc=0.2807, ValLoss=11.3274
+    Early stopping triggered.
+    New data recall: 0.2424
 
-# =====================================================================================
-# =                             פונקציית עזר (מועתקת מהקוד הראשי)                       =
-# =====================================================================================
+  >>> Fold 4/5 <<<
+    Original train samples: 309
+    Train samples after SMOTE: 471
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.5053, ValAcc=0.0000, ValLoss=8.1558
+    Epoch 02: TrainAcc=0.6794, ValAcc=0.0000, ValLoss=3.5726
+    Epoch 03: TrainAcc=0.8004, ValAcc=0.0000, ValLoss=10.9418
+    Epoch 04: TrainAcc=0.8535, ValAcc=0.0000, ValLoss=10.4377
+    Epoch 05: TrainAcc=0.8514, ValAcc=0.0000, ValLoss=6.4182
+    Epoch 06: TrainAcc=0.8832, ValAcc=0.0833, ValLoss=3.4142
+    Epoch 07: TrainAcc=0.9130, ValAcc=0.0000, ValLoss=8.3441
+    Epoch 08: TrainAcc=0.9066, ValAcc=0.0000, ValLoss=12.6208
+    Epoch 09: TrainAcc=0.8917, ValAcc=0.0000, ValLoss=10.0192
+    Epoch 10: TrainAcc=0.9172, ValAcc=0.0000, ValLoss=8.6339
+    Epoch 11: TrainAcc=0.9066, ValAcc=0.0000, ValLoss=10.0372
+    Epoch 12: TrainAcc=0.9236, ValAcc=0.0000, ValLoss=9.8004
+    Epoch 13: TrainAcc=0.9087, ValAcc=0.0000, ValLoss=12.6990
+    Epoch 14: TrainAcc=0.9130, ValAcc=0.0000, ValLoss=12.8704
+    Epoch 15: TrainAcc=0.9130, ValAcc=0.0000, ValLoss=12.7019
+    Epoch 16: TrainAcc=0.9299, ValAcc=0.0000, ValLoss=13.8223
+    Epoch 17: TrainAcc=0.9278, ValAcc=0.0000, ValLoss=15.8230
+    Epoch 18: TrainAcc=0.9321, ValAcc=0.0000, ValLoss=12.3441
+    Epoch 19: TrainAcc=0.9406, ValAcc=0.0000, ValLoss=13.1251
+    Epoch 20: TrainAcc=0.9130, ValAcc=0.0000, ValLoss=16.4005
+    Epoch 21: TrainAcc=0.9363, ValAcc=0.0000, ValLoss=13.4181
+    Epoch 22: TrainAcc=0.9512, ValAcc=0.0000, ValLoss=18.9221
+    Epoch 23: TrainAcc=0.9469, ValAcc=0.0000, ValLoss=33.8625
+    Epoch 24: TrainAcc=0.9321, ValAcc=0.0000, ValLoss=15.5866
+    Epoch 25: TrainAcc=0.9363, ValAcc=0.0000, ValLoss=17.4901
+    Epoch 26: TrainAcc=0.9363, ValAcc=0.0000, ValLoss=23.3058
+    Early stopping triggered.
+ FOld 4 : Val ACC 0.0833 is below threshold 0.80. Skipping new data evaluation.
 
-def pad_channels(data, target_channels):
-    """מרפד או חותך ערוצים כדי להגיע למספר היעד."""
-    if data.ndim == 1:
-        data = data.reshape(-1, 1)
-    current_channels = data.shape[1]
-    if current_channels < target_channels:
-        padding = np.zeros((data.shape[0], target_channels - current_channels), dtype=data.dtype)
-        return np.hstack((data, padding))
-    elif current_channels > target_channels:
-        return data[:, :target_channels]
-    else:
-        return data
+  >>> Fold 5/5 <<<
+    Original train samples: 327
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4520, ValAcc=1.0000, ValLoss=0.3478
+    Epoch 02: TrainAcc=0.6244, ValAcc=1.0000, ValLoss=0.1870
+    Epoch 03: TrainAcc=0.8439, ValAcc=1.0000, ValLoss=0.1030
+    Epoch 04: TrainAcc=0.8650, ValAcc=1.0000, ValLoss=0.0487
+    Epoch 05: TrainAcc=0.9089, ValAcc=1.0000, ValLoss=0.1496
+    Epoch 06: TrainAcc=0.9008, ValAcc=1.0000, ValLoss=0.0928
+    Epoch 07: TrainAcc=0.9203, ValAcc=1.0000, ValLoss=0.1230
+    Epoch 08: TrainAcc=0.9154, ValAcc=1.0000, ValLoss=0.0456
+    Epoch 09: TrainAcc=0.9171, ValAcc=1.0000, ValLoss=0.0505
+    Epoch 10: TrainAcc=0.9203, ValAcc=1.0000, ValLoss=0.0439
+    Epoch 11: TrainAcc=0.9236, ValAcc=0.9333, ValLoss=0.3683
+    Epoch 12: TrainAcc=0.9285, ValAcc=0.8000, ValLoss=0.3321
+    Epoch 13: TrainAcc=0.9301, ValAcc=0.9333, ValLoss=0.1003
+    Epoch 14: TrainAcc=0.9236, ValAcc=1.0000, ValLoss=0.1233
+    Epoch 15: TrainAcc=0.9366, ValAcc=0.7667, ValLoss=0.3471
+    Epoch 16: TrainAcc=0.9398, ValAcc=1.0000, ValLoss=0.0385
+    Epoch 17: TrainAcc=0.9285, ValAcc=0.6000, ValLoss=0.7128
+    Epoch 18: TrainAcc=0.9236, ValAcc=0.9333, ValLoss=0.2704
+    Epoch 19: TrainAcc=0.9382, ValAcc=0.7333, ValLoss=0.3361
+    Epoch 20: TrainAcc=0.9350, ValAcc=0.5667, ValLoss=0.6090
+    Epoch 21: TrainAcc=0.9236, ValAcc=1.0000, ValLoss=0.3135
+    Epoch 22: TrainAcc=0.9285, ValAcc=0.8667, ValLoss=0.1998
+    Epoch 23: TrainAcc=0.9577, ValAcc=1.0000, ValLoss=0.0248
+    Epoch 24: TrainAcc=0.9398, ValAcc=1.0000, ValLoss=0.0489
+    Epoch 25: TrainAcc=0.9382, ValAcc=0.9667, ValLoss=0.2021
+    Epoch 26: TrainAcc=0.9350, ValAcc=1.0000, ValLoss=0.0019
+    Epoch 27: TrainAcc=0.9268, ValAcc=1.0000, ValLoss=0.0072
+    Epoch 28: TrainAcc=0.9415, ValAcc=1.0000, ValLoss=0.0087
+    Epoch 29: TrainAcc=0.9415, ValAcc=1.0000, ValLoss=0.0232
+    Epoch 30: TrainAcc=0.9203, ValAcc=0.9667, ValLoss=0.3180
+    Epoch 31: TrainAcc=0.9285, ValAcc=0.6000, ValLoss=0.6682
+    Epoch 32: TrainAcc=0.9301, ValAcc=0.9667, ValLoss=0.2365
+    Epoch 33: TrainAcc=0.9268, ValAcc=0.8667, ValLoss=0.2653
+    Epoch 34: TrainAcc=0.9398, ValAcc=0.9667, ValLoss=0.2886
+    Epoch 35: TrainAcc=0.9285, ValAcc=0.9667, ValLoss=0.3899
+    Epoch 36: TrainAcc=0.9366, ValAcc=0.6333, ValLoss=0.4171
+    Epoch 37: TrainAcc=0.9577, ValAcc=0.5333, ValLoss=1.1185
+    Epoch 38: TrainAcc=0.9545, ValAcc=1.0000, ValLoss=0.0279
+    Epoch 39: TrainAcc=0.9382, ValAcc=0.9333, ValLoss=0.1898
+    Epoch 40: TrainAcc=0.9496, ValAcc=1.0000, ValLoss=0.1602
+    Epoch 41: TrainAcc=0.9512, ValAcc=0.7000, ValLoss=0.3755
+    Epoch 42: TrainAcc=0.9545, ValAcc=0.2333, ValLoss=1.5265
+    Epoch 43: TrainAcc=0.9382, ValAcc=0.9667, ValLoss=0.2676
+    Epoch 44: TrainAcc=0.9545, ValAcc=0.8000, ValLoss=0.3227
+    Epoch 45: TrainAcc=0.9496, ValAcc=0.6667, ValLoss=0.3617
+    Epoch 46: TrainAcc=0.9366, ValAcc=0.6333, ValLoss=0.3206
+    Early stopping triggered.
+[I 2025-03-29 20:33:55,473] Trial 1 finished with value: 0.19292179018500055 and parameters: {'lr': 0.002348612694535465, 'dropout_p': 0.6, 'weight_decay': 0.0008718156403749597, 'stat_dim': 64, 'comb_dim': 256, 'specaug_freq': 30, 'specaug_time': 48, 'specaug_f_masks': 1, 'specaug_t_masks': 2}. Best is trial 1 with value: 0.19292179018500055.
+    New data recall: 0.2427
 
-# =====================================================================================
-# =                      הכנת המסנן ויצירת הגרפים                                     =
-# =====================================================================================
+  === Results for Trial #1 ===
+  Avg Val Acc = 0.4167, Avg New Recall = 0.0970, Combined Score = 0.1929
+  ------------------------------------------------------------
 
-# 1. תכנון המסנן
-try:
-    nyquist = 0.5 * fs
-    low = lowcut / nyquist
-    high = highcut / nyquist
-    # b, a הם מקדמי המסנן
-    b, a = butter(order, [low, high], btype='band')
-    print(f"Butterworth filter (order={order}, lowcut={lowcut} Hz, highcut={highcut} Hz) designed successfully.")
-    print("-" * 30)
-except ValueError as ve:
-     print(f"Error designing the filter: {ve}")
-     print("Check if lowcut < highcut and both are within valid range (0, fs/2).")
-     exit()
-except Exception as e:
-    print(f"An unexpected error occurred during filter design: {e}")
-    exit()
+======================================================================
+Starting Optuna Trial #2 at Sat Mar 29 20:33:56 2025
+======================================================================
+Chosen hyperparams: lr=2.3e-04, dropout=0.2, wd=5.7e-05, stat_dim=64, comb_dim=256, freq_mask=14, time_mask=25, freq_masks=1, time_masks=2
 
-# 2. וקטור זמן עבור הגרפים (באורך חלון אחד)
-time_vector = np.arange(window_size) / fs
+  >>> Fold 1/5 <<<
+    Original train samples: 200
+    Train samples after SMOTE: 261
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3410, ValAcc=0.4904, ValLoss=1.0322
+    Epoch 02: TrainAcc=0.7011, ValAcc=0.1592, ValLoss=1.0143
+    Epoch 03: TrainAcc=0.8238, ValAcc=0.0000, ValLoss=1.1192
+    Epoch 04: TrainAcc=0.8467, ValAcc=0.0000, ValLoss=1.4948
+    Epoch 05: TrainAcc=0.8467, ValAcc=0.0000, ValLoss=1.6935
+    Epoch 06: TrainAcc=0.8467, ValAcc=0.0255, ValLoss=1.2978
+    Epoch 07: TrainAcc=0.8352, ValAcc=0.1720, ValLoss=1.1420
+    Epoch 08: TrainAcc=0.8429, ValAcc=0.1911, ValLoss=1.1905
+    Epoch 09: TrainAcc=0.8506, ValAcc=0.0573, ValLoss=1.4637
+    Epoch 10: TrainAcc=0.8314, ValAcc=0.0064, ValLoss=1.9487
+    Epoch 11: TrainAcc=0.8467, ValAcc=0.0255, ValLoss=2.0942
+    Epoch 12: TrainAcc=0.8697, ValAcc=0.0255, ValLoss=2.3293
+    Epoch 13: TrainAcc=0.8506, ValAcc=0.0446, ValLoss=2.2854
+    Epoch 14: TrainAcc=0.8774, ValAcc=0.0382, ValLoss=2.3910
+    Epoch 15: TrainAcc=0.8659, ValAcc=0.0127, ValLoss=2.8143
+    Epoch 16: TrainAcc=0.8774, ValAcc=0.0000, ValLoss=2.9196
+    Epoch 17: TrainAcc=0.8851, ValAcc=0.0000, ValLoss=2.9008
+    Epoch 18: TrainAcc=0.9042, ValAcc=0.0000, ValLoss=2.9262
+    Epoch 19: TrainAcc=0.9234, ValAcc=0.0000, ValLoss=3.2270
+    Epoch 20: TrainAcc=0.9195, ValAcc=0.0064, ValLoss=3.6223
+    Epoch 21: TrainAcc=0.9387, ValAcc=0.0191, ValLoss=3.5545
+    Epoch 22: TrainAcc=0.9425, ValAcc=0.0191, ValLoss=3.4363
+    Early stopping triggered.
+ FOld 1 : Val ACC 0.1592 is below threshold 0.80. Skipping new data evaluation.
 
-# 3. לולאה על כל מחלקה להדגמה
-for label, class_name in zip(ORIGINAL_DATA_PATHS.keys(), CLASS_NAMES):
-    # ניקח את הקובץ הראשון שהוגדר למחלקה זו
-    filepath = ORIGINAL_DATA_PATHS[label]['path'][0]
-    print(f"Processing example from: {filepath} (Class: {class_name})")
+  >>> Fold 2/5 <<<
+    Original train samples: 292
+    Train samples after SMOTE: 410
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.5220, ValAcc=0.0462, ValLoss=1.2401
+    Epoch 02: TrainAcc=0.5171, ValAcc=0.0000, ValLoss=2.8958
+    Epoch 03: TrainAcc=0.5049, ValAcc=0.0000, ValLoss=5.8194
+    Epoch 04: TrainAcc=0.5732, ValAcc=0.0000, ValLoss=6.1523
+    Epoch 05: TrainAcc=0.7000, ValAcc=0.0000, ValLoss=6.5882
+    Epoch 06: TrainAcc=0.6659, ValAcc=0.0000, ValLoss=6.9424
+    Epoch 07: TrainAcc=0.7195, ValAcc=0.0000, ValLoss=6.7199
+    Epoch 08: TrainAcc=0.7927, ValAcc=0.0000, ValLoss=5.6798
+    Epoch 09: TrainAcc=0.8220, ValAcc=0.0000, ValLoss=4.7934
+    Epoch 10: TrainAcc=0.8683, ValAcc=0.0000, ValLoss=4.7611
+    Epoch 11: TrainAcc=0.8707, ValAcc=0.0000, ValLoss=5.1782
+    Epoch 12: TrainAcc=0.8951, ValAcc=0.0000, ValLoss=5.7832
+    Epoch 13: TrainAcc=0.9098, ValAcc=0.0000, ValLoss=6.1478
+    Epoch 14: TrainAcc=0.9366, ValAcc=0.0000, ValLoss=7.0794
+    Epoch 15: TrainAcc=0.9293, ValAcc=0.0000, ValLoss=8.3378
+    Epoch 16: TrainAcc=0.9317, ValAcc=0.0000, ValLoss=8.7392
+    Epoch 17: TrainAcc=0.9463, ValAcc=0.0000, ValLoss=8.9880
+    Epoch 18: TrainAcc=0.9585, ValAcc=0.0000, ValLoss=9.4833
+    Epoch 19: TrainAcc=0.9537, ValAcc=0.0000, ValLoss=9.6063
+    Epoch 20: TrainAcc=0.9463, ValAcc=0.0000, ValLoss=10.0467
+    Epoch 21: TrainAcc=0.9512, ValAcc=0.0000, ValLoss=10.7582
+    Early stopping triggered.
+ FOld 2 : Val ACC 0.0462 is below threshold 0.80. Skipping new data evaluation.
 
-    if not os.path.exists(filepath):
-        print(f"  ERROR: File not found at '{filepath}'. Please check the path.")
-        print("-" * 30)
-        continue
+  >>> Fold 3/5 <<<
+    Original train samples: 300
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3724, ValAcc=0.0175, ValLoss=1.1288
+    Epoch 02: TrainAcc=0.4943, ValAcc=0.7018, ValLoss=0.9874
+    Epoch 03: TrainAcc=0.5626, ValAcc=1.0000, ValLoss=0.6609
+    Epoch 04: TrainAcc=0.6667, ValAcc=1.0000, ValLoss=0.4596
+    Epoch 05: TrainAcc=0.6813, ValAcc=1.0000, ValLoss=0.4176
+    Epoch 06: TrainAcc=0.7577, ValAcc=0.8246, ValLoss=0.4748
+    Epoch 07: TrainAcc=0.8634, ValAcc=0.5614, ValLoss=0.7434
+    Epoch 08: TrainAcc=0.9220, ValAcc=0.4035, ValLoss=1.2195
+    Epoch 09: TrainAcc=0.9496, ValAcc=0.3333, ValLoss=1.6279
+    Epoch 10: TrainAcc=0.9577, ValAcc=0.2982, ValLoss=2.4404
+    Epoch 11: TrainAcc=0.9675, ValAcc=0.3158, ValLoss=2.0558
+    Epoch 12: TrainAcc=0.9642, ValAcc=0.3509, ValLoss=1.9754
+    Epoch 13: TrainAcc=0.9707, ValAcc=0.2982, ValLoss=3.1533
+    Epoch 14: TrainAcc=0.9740, ValAcc=0.3158, ValLoss=2.6593
+    Epoch 15: TrainAcc=0.9740, ValAcc=0.3333, ValLoss=2.7016
+    Epoch 16: TrainAcc=0.9740, ValAcc=0.2982, ValLoss=3.1750
+    Epoch 17: TrainAcc=0.9740, ValAcc=0.3158, ValLoss=3.1392
+    Epoch 18: TrainAcc=0.9740, ValAcc=0.2982, ValLoss=3.5967
+    Epoch 19: TrainAcc=0.9772, ValAcc=0.3333, ValLoss=3.2024
+    Epoch 20: TrainAcc=0.9756, ValAcc=0.3158, ValLoss=3.6809
+    Epoch 21: TrainAcc=0.9772, ValAcc=0.3333, ValLoss=3.2559
+    Epoch 22: TrainAcc=0.9740, ValAcc=0.2982, ValLoss=4.4690
+    Epoch 23: TrainAcc=0.9789, ValAcc=0.3509, ValLoss=3.4569
+    Epoch 24: TrainAcc=0.9724, ValAcc=0.3158, ValLoss=3.7653
+    Epoch 25: TrainAcc=0.9772, ValAcc=0.2807, ValLoss=4.6766
+    Early stopping triggered.
+    New data recall: 0.2460
 
-    try:
-        # 3.1. טעינת הנתונים
-        df = pd.read_csv(filepath, header=None)
+  >>> Fold 4/5 <<<
+    Original train samples: 309
+    Train samples after SMOTE: 471
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3907, ValAcc=0.9792, ValLoss=0.9950
+    Epoch 02: TrainAcc=0.5754, ValAcc=0.2292, ValLoss=1.2193
+    Epoch 03: TrainAcc=0.6115, ValAcc=0.0000, ValLoss=2.0492
+    Epoch 04: TrainAcc=0.6221, ValAcc=0.0000, ValLoss=3.2809
+    Epoch 05: TrainAcc=0.7155, ValAcc=0.0000, ValLoss=3.0404
+    Epoch 06: TrainAcc=0.7452, ValAcc=0.0000, ValLoss=3.2187
+    Epoch 07: TrainAcc=0.7622, ValAcc=0.0000, ValLoss=3.7111
+    Epoch 08: TrainAcc=0.8217, ValAcc=0.0000, ValLoss=3.2722
+    Epoch 09: TrainAcc=0.8599, ValAcc=0.0000, ValLoss=3.3714
+    Epoch 10: TrainAcc=0.8769, ValAcc=0.0000, ValLoss=3.6078
+    Epoch 11: TrainAcc=0.8875, ValAcc=0.0000, ValLoss=3.6120
+    Epoch 12: TrainAcc=0.9023, ValAcc=0.0000, ValLoss=4.0055
+    Epoch 13: TrainAcc=0.9172, ValAcc=0.0000, ValLoss=4.0349
+    Epoch 14: TrainAcc=0.9427, ValAcc=0.0000, ValLoss=3.8317
+    Epoch 15: TrainAcc=0.9214, ValAcc=0.0000, ValLoss=3.2746
+    Epoch 16: TrainAcc=0.9278, ValAcc=0.0000, ValLoss=3.6868
+    Epoch 17: TrainAcc=0.9406, ValAcc=0.0000, ValLoss=3.8167
+    Epoch 18: TrainAcc=0.9512, ValAcc=0.0000, ValLoss=3.5774
+    Epoch 19: TrainAcc=0.9575, ValAcc=0.0000, ValLoss=3.6900
+    Epoch 20: TrainAcc=0.9724, ValAcc=0.0000, ValLoss=3.9469
+    Epoch 21: TrainAcc=0.9618, ValAcc=0.0000, ValLoss=4.2046
+    Early stopping triggered.
+    New data recall: 0.2912
 
-        # 3.2. טיפול בערכים חסרים (אסטרטגיית ממוצע)
-        df_original_shape = df.shape
-        df = df.dropna(how='all') # הסרת שורות ריקות לחלוטין
-        if df.empty:
-             print(f"  ERROR: Dataframe is empty after dropping all-NaN rows in {filepath}")
-             print("-" * 30)
-             continue
-        imputer = SimpleImputer(strategy='mean')
-        # שימוש ב-values מבטיח שנקבל numpy array
-        data_imputed = imputer.fit_transform(df.values)
+  >>> Fold 5/5 <<<
+    Original train samples: 327
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3902, ValAcc=0.1333, ValLoss=1.0873
+    Epoch 02: TrainAcc=0.4992, ValAcc=0.9333, ValLoss=0.7903
+    Epoch 03: TrainAcc=0.5659, ValAcc=0.9333, ValLoss=0.7143
+    Epoch 04: TrainAcc=0.6439, ValAcc=1.0000, ValLoss=0.4788
+    Epoch 05: TrainAcc=0.6943, ValAcc=1.0000, ValLoss=0.3227
+    Epoch 06: TrainAcc=0.7106, ValAcc=1.0000, ValLoss=0.2561
+    Epoch 07: TrainAcc=0.7772, ValAcc=1.0000, ValLoss=0.2248
+    Epoch 08: TrainAcc=0.8472, ValAcc=1.0000, ValLoss=0.1576
+    Epoch 09: TrainAcc=0.8813, ValAcc=0.9667, ValLoss=0.1890
+    Epoch 10: TrainAcc=0.8992, ValAcc=0.8333, ValLoss=0.3341
+    Epoch 11: TrainAcc=0.9301, ValAcc=0.8333, ValLoss=0.2673
+    Epoch 12: TrainAcc=0.9285, ValAcc=0.6667, ValLoss=0.5964
+    Epoch 13: TrainAcc=0.9480, ValAcc=0.7333, ValLoss=0.3929
+    Epoch 14: TrainAcc=0.9415, ValAcc=0.6333, ValLoss=0.7843
+    Epoch 15: TrainAcc=0.9512, ValAcc=0.8333, ValLoss=0.2432
+    Epoch 16: TrainAcc=0.9366, ValAcc=0.6667, ValLoss=0.5075
+    Epoch 17: TrainAcc=0.9593, ValAcc=0.6333, ValLoss=0.7965
+    Epoch 18: TrainAcc=0.9642, ValAcc=0.7000, ValLoss=0.5443
+    Epoch 19: TrainAcc=0.9577, ValAcc=0.6333, ValLoss=0.6693
+    Epoch 20: TrainAcc=0.9561, ValAcc=0.7000, ValLoss=0.4237
+    Epoch 21: TrainAcc=0.9707, ValAcc=0.6000, ValLoss=0.8289
+    Epoch 22: TrainAcc=0.9642, ValAcc=0.6667, ValLoss=0.5495
+    Epoch 23: TrainAcc=0.9593, ValAcc=0.6333, ValLoss=0.7830
+    Epoch 24: TrainAcc=0.9724, ValAcc=0.6333, ValLoss=1.0507
+    Epoch 25: TrainAcc=0.9772, ValAcc=0.7000, ValLoss=0.8302
+    Epoch 26: TrainAcc=0.9610, ValAcc=0.7000, ValLoss=0.6678
+    Epoch 27: TrainAcc=0.9740, ValAcc=0.6667, ValLoss=1.0007
+    Epoch 28: TrainAcc=0.9659, ValAcc=0.7667, ValLoss=0.4506
+    Early stopping triggered.
+[I 2025-03-29 20:38:55,166] Trial 2 finished with value: 0.3042505061575033 and parameters: {'lr': 0.00023181095653316877, 'dropout_p': 0.2, 'weight_decay': 5.7452857644940714e-05, 'stat_dim': 64, 'comb_dim': 256, 'specaug_freq': 14, 'specaug_time': 25, 'specaug_f_masks': 1, 'specaug_t_masks': 2}. Best is trial 2 with value: 0.3042505061575033.
+    New data recall: 0.2711
 
-        # 3.3. ריפוד או חיתוך ערוצים
-        data_padded = pad_channels(data_imputed, max_channels)
+  === Results for Trial #2 ===
+  Avg Val Acc = 0.6369, Avg New Recall = 0.1617, Combined Score = 0.3043
+  ------------------------------------------------------------
 
-        # 3.4. בדיקה אם יש מספיק נתונים לחלון אחד
-        if data_padded.shape[0] < window_size:
-            print(f"  WARNING: Not enough data in {filepath} for a full window ({data_padded.shape[0]} < {window_size}). Skipping visualization for this file.")
-            print("-" * 30)
-            continue
+======================================================================
+Starting Optuna Trial #3 at Sat Mar 29 20:38:56 2025
+======================================================================
+Chosen hyperparams: lr=1.5e-04, dropout=0.4, wd=1.5e-05, stat_dim=64, comb_dim=128, freq_mask=22, time_mask=24, freq_masks=2, time_masks=1
 
-        # 3.5. לקיחת חלון אחד וערוץ אחד (כפי שהוגדר ב-channel_to_plot)
-        # מוודאים שאינדקס הערוץ תקין
-        if channel_to_plot >= data_padded.shape[1]:
-             print(f"  WARNING: channel_to_plot ({channel_to_plot}) is out of bounds for available channels ({data_padded.shape[1]}). Using channel 0 instead.")
-             current_channel_to_plot = 0
-        else:
-             current_channel_to_plot = channel_to_plot
+  >>> Fold 1/5 <<<
+    Original train samples: 200
+    Train samples after SMOTE: 261
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3487, ValAcc=0.0510, ValLoss=1.1130
+    Epoch 02: TrainAcc=0.5402, ValAcc=0.2803, ValLoss=1.1032
+    Epoch 03: TrainAcc=0.6820, ValAcc=0.1529, ValLoss=1.1403
+    Epoch 04: TrainAcc=0.7663, ValAcc=0.0382, ValLoss=1.3176
+    Epoch 05: TrainAcc=0.8276, ValAcc=0.0064, ValLoss=1.6118
+    Epoch 06: TrainAcc=0.8429, ValAcc=0.0064, ValLoss=1.9421
+    Epoch 07: TrainAcc=0.8314, ValAcc=0.0064, ValLoss=2.1686
+    Epoch 08: TrainAcc=0.8352, ValAcc=0.0000, ValLoss=2.5510
+    Epoch 09: TrainAcc=0.8391, ValAcc=0.0000, ValLoss=2.6311
+    Epoch 10: TrainAcc=0.8391, ValAcc=0.0064, ValLoss=2.6341
+    Epoch 11: TrainAcc=0.8276, ValAcc=0.0000, ValLoss=2.5433
+    Epoch 12: TrainAcc=0.8506, ValAcc=0.0000, ValLoss=2.6616
+    Epoch 13: TrainAcc=0.8467, ValAcc=0.0064, ValLoss=2.6228
+    Epoch 14: TrainAcc=0.8429, ValAcc=0.0000, ValLoss=2.7473
+    Epoch 15: TrainAcc=0.8391, ValAcc=0.0000, ValLoss=2.9347
+    Epoch 16: TrainAcc=0.8391, ValAcc=0.0000, ValLoss=3.0386
+    Epoch 17: TrainAcc=0.8429, ValAcc=0.0000, ValLoss=3.2261
+    Epoch 18: TrainAcc=0.8391, ValAcc=0.0000, ValLoss=3.2622
+    Epoch 19: TrainAcc=0.8429, ValAcc=0.0000, ValLoss=3.3926
+    Epoch 20: TrainAcc=0.8506, ValAcc=0.0000, ValLoss=3.6182
+    Epoch 21: TrainAcc=0.8352, ValAcc=0.0000, ValLoss=3.7292
+    Epoch 22: TrainAcc=0.8467, ValAcc=0.0000, ValLoss=3.2459
+    Early stopping triggered.
+ FOld 1 : Val ACC 0.2803 is below threshold 0.80. Skipping new data evaluation.
 
-        window_data_original = data_padded[:window_size, current_channel_to_plot]
-        print(f"  Extracted first {window_size} samples from channel {current_channel_to_plot}.")
+  >>> Fold 2/5 <<<
+    Original train samples: 292
+    Train samples after SMOTE: 410
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4317, ValAcc=0.0000, ValLoss=1.2316
+    Epoch 02: TrainAcc=0.4902, ValAcc=0.0000, ValLoss=1.4508
+    Epoch 03: TrainAcc=0.5171, ValAcc=0.0000, ValLoss=2.3851
+    Epoch 04: TrainAcc=0.5171, ValAcc=0.0000, ValLoss=2.9608
+    Epoch 05: TrainAcc=0.5073, ValAcc=0.0000, ValLoss=3.3689
+    Epoch 06: TrainAcc=0.5049, ValAcc=0.0000, ValLoss=3.9814
+    Epoch 07: TrainAcc=0.5122, ValAcc=0.0000, ValLoss=4.8593
+    Epoch 08: TrainAcc=0.5756, ValAcc=0.0000, ValLoss=5.0156
+    Epoch 09: TrainAcc=0.5829, ValAcc=0.0000, ValLoss=4.7713
+    Epoch 10: TrainAcc=0.6244, ValAcc=0.0000, ValLoss=4.4993
+    Epoch 11: TrainAcc=0.6463, ValAcc=0.0000, ValLoss=4.6322
+    Epoch 12: TrainAcc=0.6537, ValAcc=0.0000, ValLoss=4.5274
+    Epoch 13: TrainAcc=0.7268, ValAcc=0.0000, ValLoss=4.2873
+    Epoch 14: TrainAcc=0.7463, ValAcc=0.0000, ValLoss=4.3000
+    Epoch 15: TrainAcc=0.7780, ValAcc=0.0000, ValLoss=4.3488
+    Epoch 16: TrainAcc=0.8098, ValAcc=0.0000, ValLoss=4.0609
+    Epoch 17: TrainAcc=0.8000, ValAcc=0.0000, ValLoss=3.8799
+    Epoch 18: TrainAcc=0.8220, ValAcc=0.0000, ValLoss=3.5986
+    Epoch 19: TrainAcc=0.8561, ValAcc=0.0000, ValLoss=3.6846
+    Epoch 20: TrainAcc=0.8659, ValAcc=0.0000, ValLoss=3.7985
+    Epoch 21: TrainAcc=0.8878, ValAcc=0.0000, ValLoss=3.9000
+    Early stopping triggered.
+ FOld 2 : Val ACC 0.0000 is below threshold 0.80. Skipping new data evaluation.
 
-        # 3.6. החלת הסינון על החלון
-        window_data_filtered = filtfilt(b, a, window_data_original)
-        print("  Applied Butterworth filter.")
+  >>> Fold 3/5 <<<
+    Original train samples: 300
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3252, ValAcc=0.0175, ValLoss=1.1300
+    Epoch 02: TrainAcc=0.4163, ValAcc=0.8246, ValLoss=1.0515
+    Epoch 03: TrainAcc=0.4878, ValAcc=1.0000, ValLoss=0.9045
+    Epoch 04: TrainAcc=0.4927, ValAcc=1.0000, ValLoss=0.7080
+    Epoch 05: TrainAcc=0.5398, ValAcc=1.0000, ValLoss=0.5983
+    Epoch 06: TrainAcc=0.5724, ValAcc=1.0000, ValLoss=0.5524
+    Epoch 07: TrainAcc=0.6033, ValAcc=1.0000, ValLoss=0.4871
+    Epoch 08: TrainAcc=0.6390, ValAcc=1.0000, ValLoss=0.4975
+    Epoch 09: TrainAcc=0.6585, ValAcc=1.0000, ValLoss=0.4448
+    Epoch 10: TrainAcc=0.6748, ValAcc=1.0000, ValLoss=0.4591
+    Epoch 11: TrainAcc=0.7057, ValAcc=0.9649, ValLoss=0.4243
+    Epoch 12: TrainAcc=0.7496, ValAcc=0.8947, ValLoss=0.4339
+    Epoch 13: TrainAcc=0.8081, ValAcc=0.7895, ValLoss=0.4812
+    Epoch 14: TrainAcc=0.8699, ValAcc=0.6491, ValLoss=0.6174
+    Epoch 15: TrainAcc=0.9008, ValAcc=0.5965, ValLoss=0.6494
+    Epoch 16: TrainAcc=0.9252, ValAcc=0.5439, ValLoss=0.7528
+    Epoch 17: TrainAcc=0.9122, ValAcc=0.5088, ValLoss=0.8414
+    Epoch 18: TrainAcc=0.9317, ValAcc=0.3860, ValLoss=1.1125
+    Epoch 19: TrainAcc=0.9545, ValAcc=0.3333, ValLoss=1.3857
+    Epoch 20: TrainAcc=0.9528, ValAcc=0.2982, ValLoss=1.7081
+    Epoch 21: TrainAcc=0.9593, ValAcc=0.2982, ValLoss=1.4768
+    Epoch 22: TrainAcc=0.9626, ValAcc=0.3158, ValLoss=1.6721
+    Epoch 23: TrainAcc=0.9626, ValAcc=0.2982, ValLoss=2.1759
+    Epoch 24: TrainAcc=0.9675, ValAcc=0.2982, ValLoss=2.4675
+    Epoch 25: TrainAcc=0.9675, ValAcc=0.2807, ValLoss=2.5932
+    Epoch 26: TrainAcc=0.9740, ValAcc=0.2807, ValLoss=3.1322
+    Epoch 27: TrainAcc=0.9707, ValAcc=0.2807, ValLoss=3.2828
+    Epoch 28: TrainAcc=0.9724, ValAcc=0.2807, ValLoss=2.8006
+    Epoch 29: TrainAcc=0.9772, ValAcc=0.2632, ValLoss=3.3380
+    Epoch 30: TrainAcc=0.9789, ValAcc=0.2807, ValLoss=2.9713
+    Epoch 31: TrainAcc=0.9626, ValAcc=0.2982, ValLoss=2.8146
+    Early stopping triggered.
+    New data recall: 0.2606
 
-        # 3.7. חישוב ספקטרום תדרים (FFT) להצגה
-        fft_original = np.fft.fft(window_data_original)
-        fft_filtered = np.fft.fft(window_data_filtered)
-        # חישוב התדרים המתאימים
-        freqs = np.fft.fftfreq(window_size, 1/fs)
+  >>> Fold 4/5 <<<
+    Original train samples: 309
+    Train samples after SMOTE: 471
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3907, ValAcc=0.9167, ValLoss=1.0142
+    Epoch 02: TrainAcc=0.4820, ValAcc=0.1875, ValLoss=1.1518
+    Epoch 03: TrainAcc=0.5414, ValAcc=0.0000, ValLoss=1.7218
+    Epoch 04: TrainAcc=0.5966, ValAcc=0.0000, ValLoss=2.2928
+    Epoch 05: TrainAcc=0.5817, ValAcc=0.0000, ValLoss=2.6171
+    Epoch 06: TrainAcc=0.6624, ValAcc=0.0000, ValLoss=2.5577
+    Epoch 07: TrainAcc=0.6624, ValAcc=0.0000, ValLoss=2.6891
+    Epoch 08: TrainAcc=0.6773, ValAcc=0.0000, ValLoss=3.1014
+    Epoch 09: TrainAcc=0.7028, ValAcc=0.0000, ValLoss=3.2530
+    Epoch 10: TrainAcc=0.6964, ValAcc=0.0000, ValLoss=3.2141
+    Epoch 11: TrainAcc=0.7601, ValAcc=0.0000, ValLoss=3.4938
+    Epoch 12: TrainAcc=0.7877, ValAcc=0.0000, ValLoss=3.5694
+    Epoch 13: TrainAcc=0.8089, ValAcc=0.0000, ValLoss=3.5721
+    Epoch 14: TrainAcc=0.8004, ValAcc=0.0000, ValLoss=3.5466
+    Epoch 15: TrainAcc=0.8280, ValAcc=0.0000, ValLoss=3.5019
+    Epoch 16: TrainAcc=0.8705, ValAcc=0.0000, ValLoss=3.5376
+    Epoch 17: TrainAcc=0.8832, ValAcc=0.0000, ValLoss=3.7961
+    Epoch 18: TrainAcc=0.8896, ValAcc=0.0000, ValLoss=4.0781
+    Epoch 19: TrainAcc=0.8811, ValAcc=0.0000, ValLoss=3.7722
+    Epoch 20: TrainAcc=0.9151, ValAcc=0.0000, ValLoss=4.0155
+    Epoch 21: TrainAcc=0.8981, ValAcc=0.0000, ValLoss=3.9156
+    Early stopping triggered.
+    New data recall: 0.2948
 
-        # לוקחים רק את התדרים החיוביים (כולל 0) ואת המגניטודות שלהם
-        positive_freq_indices = np.where(freqs >= 0)
-        freqs_pos = freqs[positive_freq_indices]
-        fft_mag_original = np.abs(fft_original[positive_freq_indices])
-        fft_mag_filtered = np.abs(fft_filtered[positive_freq_indices])
-        print("  Calculated FFT.")
+  >>> Fold 5/5 <<<
+    Original train samples: 327
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3805, ValAcc=0.2667, ValLoss=1.0871
+    Epoch 02: TrainAcc=0.4569, ValAcc=0.8333, ValLoss=1.0042
+    Epoch 03: TrainAcc=0.4797, ValAcc=0.9667, ValLoss=0.7861
+    Epoch 04: TrainAcc=0.5220, ValAcc=1.0000, ValLoss=0.7533
+    Epoch 05: TrainAcc=0.5350, ValAcc=1.0000, ValLoss=0.7485
+    Epoch 06: TrainAcc=0.5805, ValAcc=0.9667, ValLoss=0.6865
+    Epoch 07: TrainAcc=0.6146, ValAcc=0.9667, ValLoss=0.5880
+    Epoch 08: TrainAcc=0.6309, ValAcc=1.0000, ValLoss=0.4610
+    Epoch 09: TrainAcc=0.6667, ValAcc=1.0000, ValLoss=0.3567
+    Epoch 10: TrainAcc=0.6846, ValAcc=1.0000, ValLoss=0.3204
+    Epoch 11: TrainAcc=0.7008, ValAcc=1.0000, ValLoss=0.2463
+    Epoch 12: TrainAcc=0.7285, ValAcc=1.0000, ValLoss=0.2610
+    Epoch 13: TrainAcc=0.7886, ValAcc=1.0000, ValLoss=0.2109
+    Epoch 14: TrainAcc=0.8179, ValAcc=1.0000, ValLoss=0.2025
+    Epoch 15: TrainAcc=0.8325, ValAcc=1.0000, ValLoss=0.1566
+    Epoch 16: TrainAcc=0.8732, ValAcc=1.0000, ValLoss=0.1951
+    Epoch 17: TrainAcc=0.8829, ValAcc=1.0000, ValLoss=0.2364
+    Epoch 18: TrainAcc=0.8715, ValAcc=1.0000, ValLoss=0.2051
+    Epoch 19: TrainAcc=0.8748, ValAcc=0.9333, ValLoss=0.2934
+    Epoch 20: TrainAcc=0.9089, ValAcc=0.6667, ValLoss=0.4355
+    Epoch 21: TrainAcc=0.9187, ValAcc=0.6667, ValLoss=0.4511
+    Epoch 22: TrainAcc=0.9285, ValAcc=0.6000, ValLoss=0.5203
+    Epoch 23: TrainAcc=0.9268, ValAcc=0.5667, ValLoss=0.7359
+    Epoch 24: TrainAcc=0.9382, ValAcc=0.5667, ValLoss=0.7550
+    Epoch 25: TrainAcc=0.9366, ValAcc=0.6000, ValLoss=0.7168
+    Epoch 26: TrainAcc=0.9366, ValAcc=0.5333, ValLoss=0.8360
+    Epoch 27: TrainAcc=0.9480, ValAcc=0.6000, ValLoss=0.9121
+    Epoch 28: TrainAcc=0.9496, ValAcc=0.6000, ValLoss=1.0791
+    Epoch 29: TrainAcc=0.9463, ValAcc=0.6333, ValLoss=1.0918
+    Epoch 30: TrainAcc=0.9593, ValAcc=0.6333, ValLoss=1.4798
+    Epoch 31: TrainAcc=0.9480, ValAcc=0.7000, ValLoss=0.8454
+    Epoch 32: TrainAcc=0.9528, ValAcc=0.6667, ValLoss=0.9802
+    Epoch 33: TrainAcc=0.9626, ValAcc=0.6333, ValLoss=1.4635
+    Epoch 34: TrainAcc=0.9561, ValAcc=0.6333, ValLoss=1.2024
+    Epoch 35: TrainAcc=0.9675, ValAcc=0.6667, ValLoss=1.1554
+    Early stopping triggered.
+[I 2025-03-29 20:44:23,362] Trial 3 finished with value: 0.3038797365492824 and parameters: {'lr': 0.0001491007649786847, 'dropout_p': 0.4, 'weight_decay': 1.5065727582435787e-05, 'stat_dim': 64, 'comb_dim': 128, 'specaug_freq': 22, 'specaug_time': 24, 'specaug_f_masks': 2, 'specaug_t_masks': 1}. Best is trial 2 with value: 0.3042505061575033.
+    New data recall: 0.2601
 
-        # 3.8. יצירת והצגת הגרפים
-        fig, axes = plt.subplots(2, 1, figsize=(12, 8)) # יצירת שני תתי-גרפים (אחד מעל השני)
+  === Results for Trial #3 ===
+  Avg Val Acc = 0.6324, Avg New Recall = 0.1631, Combined Score = 0.3039
+  ------------------------------------------------------------
 
-        # --- גרף תחום הזמן ---
-        axes[0].plot(time_vector, window_data_original, label='Original Signal', alpha=0.7, linewidth=1)
-        axes[0].plot(time_vector, window_data_filtered, label=f'Filtered Signal ({lowcut}-{highcut} Hz)', alpha=0.9, color='red', linewidth=1.5)
-        axes[0].set_title(f'Time Domain Signal (Window 1, Channel {current_channel_to_plot}) - {class_name}')
-        axes[0].set_xlabel('Time (seconds)')
-        axes[0].set_ylabel('Amplitude')
-        axes[0].legend()
-        axes[0].grid(True, which='both', linestyle='--', linewidth=0.5)
+======================================================================
+Starting Optuna Trial #4 at Sat Mar 29 20:44:24 2025
+======================================================================
+Chosen hyperparams: lr=2.3e-03, dropout=0.5, wd=5.6e-04, stat_dim=64, comb_dim=128, freq_mask=24, time_mask=46, freq_masks=1, time_masks=1
 
-        # --- גרף תחום התדר ---
-        axes[1].plot(freqs_pos, fft_mag_original, label='Original Spectrum', alpha=0.7, linewidth=1)
-        axes[1].plot(freqs_pos, fft_mag_filtered, label=f'Filtered Spectrum ({lowcut}-{highcut} Hz)', alpha=0.9, color='red', linewidth=1.5)
-        # הוספת קווים אנכיים ב-lowcut ו-highcut
-        axes[1].axvline(lowcut, color='grey', linestyle='--', linewidth=1.5, label=f'Cutoff ({lowcut} Hz)')
-        axes[1].axvline(highcut, color='grey', linestyle=':', linewidth=1.5, label=f'Cutoff ({highcut} Hz)')
-        axes[1].set_title(f'Frequency Domain (Magnitude Spectrum) - {class_name}')
-        axes[1].set_xlabel('Frequency (Hz)')
-        axes[1].set_ylabel('Magnitude')
-        # הגבלת ציר X כדי לראות טוב יותר את אזור הסינון
-        # הצג עד פי 1.5 מה-highcut או עד 200Hz, הקטן מביניהם, כדי לא להציג יותר מדי
-        xlim_upper = min(highcut * 1.5, 200)
-        axes[1].set_xlim(0, xlim_upper)
-        axes[1].legend()
-        axes[1].grid(True, which='both', linestyle='--', linewidth=0.5)
-        # אפשר להפעיל סקאלה לוגריתמית אם יש הבדלים גדולים במגניטודה
-        # axes[1].set_yscale('log')
+  >>> Fold 1/5 <<<
+    Original train samples: 200
+    Train samples after SMOTE: 261
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.5824, ValAcc=0.0000, ValLoss=3.1024
+    Epoch 02: TrainAcc=0.8276, ValAcc=0.1401, ValLoss=1.1602
+    Epoch 03: TrainAcc=0.8084, ValAcc=0.0000, ValLoss=2.8030
+    Epoch 04: TrainAcc=0.8582, ValAcc=0.0000, ValLoss=3.7052
+    Epoch 05: TrainAcc=0.8774, ValAcc=0.0000, ValLoss=3.2660
+    Epoch 06: TrainAcc=0.9732, ValAcc=0.0382, ValLoss=5.1759
+    Epoch 07: TrainAcc=0.9962, ValAcc=0.0828, ValLoss=5.8301
+    Epoch 08: TrainAcc=1.0000, ValAcc=0.1083, ValLoss=7.0365
+    Epoch 09: TrainAcc=1.0000, ValAcc=0.0382, ValLoss=9.5560
+    Epoch 10: TrainAcc=0.9923, ValAcc=0.0701, ValLoss=10.5514
+    Epoch 11: TrainAcc=1.0000, ValAcc=0.0637, ValLoss=11.0104
+    Epoch 12: TrainAcc=0.9962, ValAcc=0.0955, ValLoss=11.2833
+    Epoch 13: TrainAcc=1.0000, ValAcc=0.0892, ValLoss=11.6467
+    Epoch 14: TrainAcc=1.0000, ValAcc=0.1019, ValLoss=11.7986
+    Epoch 15: TrainAcc=0.9962, ValAcc=0.1019, ValLoss=11.6003
+    Epoch 16: TrainAcc=1.0000, ValAcc=0.1401, ValLoss=10.6775
+    Epoch 17: TrainAcc=1.0000, ValAcc=0.1592, ValLoss=10.5222
+    Epoch 18: TrainAcc=1.0000, ValAcc=0.1274, ValLoss=11.5352
+    Epoch 19: TrainAcc=1.0000, ValAcc=0.1083, ValLoss=12.4526
+    Epoch 20: TrainAcc=0.9962, ValAcc=0.1019, ValLoss=12.5772
+    Epoch 21: TrainAcc=0.9962, ValAcc=0.1019, ValLoss=12.6441
+    Epoch 22: TrainAcc=0.9962, ValAcc=0.1274, ValLoss=12.4078
+    Early stopping triggered.
+ FOld 1 : Val ACC 0.1401 is below threshold 0.80. Skipping new data evaluation.
 
-        fig.tight_layout() # סידור אוטומטי של הגרפים למניעת חפיפות
-        plt.show() # הצגת הגרף לדוגמה הנוכחית
-        print("  Displayed plots.")
-        print("-" * 30)
+  >>> Fold 2/5 <<<
+    Original train samples: 292
+    Train samples after SMOTE: 410
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.5463, ValAcc=0.0000, ValLoss=3.5828
+    Epoch 02: TrainAcc=0.7073, ValAcc=0.0000, ValLoss=9.9104
+    Epoch 03: TrainAcc=0.8195, ValAcc=0.0000, ValLoss=8.4091
+    Epoch 04: TrainAcc=0.8829, ValAcc=0.0000, ValLoss=9.7760
+    Epoch 05: TrainAcc=0.8902, ValAcc=0.0000, ValLoss=25.5891
+    Epoch 06: TrainAcc=0.9146, ValAcc=0.0000, ValLoss=22.6533
+    Epoch 07: TrainAcc=0.9000, ValAcc=0.0000, ValLoss=21.5212
+    Epoch 08: TrainAcc=0.9171, ValAcc=0.0000, ValLoss=19.4264
+    Epoch 09: TrainAcc=0.9122, ValAcc=0.0000, ValLoss=24.6206
+    Epoch 10: TrainAcc=0.9146, ValAcc=0.0000, ValLoss=29.2666
+    Epoch 11: TrainAcc=0.9366, ValAcc=0.0000, ValLoss=26.5031
+    Epoch 12: TrainAcc=0.9146, ValAcc=0.0000, ValLoss=29.0738
+    Epoch 13: TrainAcc=0.9537, ValAcc=0.0000, ValLoss=30.9453
+    Epoch 14: TrainAcc=0.9439, ValAcc=0.0000, ValLoss=32.1826
+    Epoch 15: TrainAcc=0.9390, ValAcc=0.0000, ValLoss=36.7911
+    Epoch 16: TrainAcc=0.9341, ValAcc=0.0000, ValLoss=39.5270
+    Epoch 17: TrainAcc=0.9293, ValAcc=0.0000, ValLoss=39.6810
+    Epoch 18: TrainAcc=0.9512, ValAcc=0.0000, ValLoss=40.0850
+    Epoch 19: TrainAcc=0.9317, ValAcc=0.0000, ValLoss=41.5186
+    Epoch 20: TrainAcc=0.9439, ValAcc=0.0000, ValLoss=42.4924
+    Epoch 21: TrainAcc=0.9610, ValAcc=0.0000, ValLoss=43.3180
+    Early stopping triggered.
+ FOld 2 : Val ACC 0.0000 is below threshold 0.80. Skipping new data evaluation.
 
-    except FileNotFoundError:
-         # כבר טופל למעלה, אבל טוב שיהיה גם כאן
-        print(f"  ERROR: File not found at '{filepath}'.")
-        print("-" * 30)
-    except pd.errors.EmptyDataError:
-        print(f"  ERROR: File '{filepath}' is empty or contains no data.")
-        print("-" * 30)
-    except Exception as e:
-        print(f"  An unexpected error occurred while processing {filepath}: {e}")
-        import traceback
-        traceback.print_exc() # הדפסת פרטי השגיאה המלאים
-        print("-" * 30)
+  >>> Fold 3/5 <<<
+    Original train samples: 300
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4634, ValAcc=1.0000, ValLoss=0.7293
+    Epoch 02: TrainAcc=0.7480, ValAcc=0.9474, ValLoss=0.2043
+    Epoch 03: TrainAcc=0.9138, ValAcc=0.4561, ValLoss=1.0291
+    Epoch 04: TrainAcc=0.9431, ValAcc=0.4737, ValLoss=1.1528
+    Epoch 05: TrainAcc=0.9447, ValAcc=0.3860, ValLoss=1.7416
+    Epoch 06: TrainAcc=0.9593, ValAcc=0.2982, ValLoss=3.4390
+    Epoch 07: TrainAcc=0.9675, ValAcc=0.2982, ValLoss=4.1214
+    Epoch 08: TrainAcc=0.9691, ValAcc=0.3158, ValLoss=3.4879
+    Epoch 09: TrainAcc=0.9642, ValAcc=0.3333, ValLoss=3.3594
+    Epoch 10: TrainAcc=0.9659, ValAcc=0.2807, ValLoss=4.3007
+    Epoch 11: TrainAcc=0.9675, ValAcc=0.2807, ValLoss=5.3319
+    Epoch 12: TrainAcc=0.9659, ValAcc=0.2807, ValLoss=5.1891
+    Epoch 13: TrainAcc=0.9724, ValAcc=0.2807, ValLoss=6.9732
+    Epoch 14: TrainAcc=0.9707, ValAcc=0.2807, ValLoss=7.3524
+    Epoch 15: TrainAcc=0.9691, ValAcc=0.2807, ValLoss=6.7201
+    Epoch 16: TrainAcc=0.9740, ValAcc=0.2982, ValLoss=6.2816
+    Epoch 17: TrainAcc=0.9691, ValAcc=0.2807, ValLoss=6.9172
+    Epoch 18: TrainAcc=0.9756, ValAcc=0.2807, ValLoss=8.6435
+    Epoch 19: TrainAcc=0.9691, ValAcc=0.2807, ValLoss=10.5227
+    Epoch 20: TrainAcc=0.9740, ValAcc=0.2807, ValLoss=8.3884
+    Epoch 21: TrainAcc=0.9691, ValAcc=0.2982, ValLoss=8.3843
+    Epoch 22: TrainAcc=0.9724, ValAcc=0.2982, ValLoss=7.0755
+    Early stopping triggered.
+    New data recall: 0.2506
 
-print("--- Visualization Script Finished ---")
+  >>> Fold 4/5 <<<
+    Original train samples: 309
+    Train samples after SMOTE: 471
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.5605, ValAcc=0.0000, ValLoss=5.1993
+    Epoch 02: TrainAcc=0.6285, ValAcc=0.0000, ValLoss=9.9293
+    Epoch 03: TrainAcc=0.7962, ValAcc=0.0000, ValLoss=8.3819
+    Epoch 04: TrainAcc=0.8684, ValAcc=0.0000, ValLoss=7.1682
+    Epoch 05: TrainAcc=0.8875, ValAcc=0.0000, ValLoss=8.6435
+    Epoch 06: TrainAcc=0.8832, ValAcc=0.0000, ValLoss=9.9760
+    Epoch 07: TrainAcc=0.8981, ValAcc=0.0625, ValLoss=4.2414
+    Epoch 08: TrainAcc=0.9130, ValAcc=0.0000, ValLoss=6.2690
+    Epoch 09: TrainAcc=0.9193, ValAcc=0.0208, ValLoss=6.7691
+    Epoch 10: TrainAcc=0.9342, ValAcc=0.0000, ValLoss=9.7514
+    Epoch 11: TrainAcc=0.9236, ValAcc=0.0000, ValLoss=12.3142
+    Epoch 12: TrainAcc=0.9108, ValAcc=0.0000, ValLoss=12.0324
+    Epoch 13: TrainAcc=0.9469, ValAcc=0.0000, ValLoss=10.9938
+    Epoch 14: TrainAcc=0.9427, ValAcc=0.0000, ValLoss=12.1488
+    Epoch 15: TrainAcc=0.9639, ValAcc=0.0000, ValLoss=14.0618
+    Epoch 16: TrainAcc=0.9299, ValAcc=0.0000, ValLoss=16.3664
+    Epoch 17: TrainAcc=0.9257, ValAcc=0.0000, ValLoss=12.0604
+    Epoch 18: TrainAcc=0.9533, ValAcc=0.0000, ValLoss=9.9118
+    Epoch 19: TrainAcc=0.9257, ValAcc=0.0000, ValLoss=15.0979
+    Epoch 20: TrainAcc=0.9512, ValAcc=0.0000, ValLoss=14.7909
+    Epoch 21: TrainAcc=0.9363, ValAcc=0.0000, ValLoss=18.0836
+    Epoch 22: TrainAcc=0.9533, ValAcc=0.0000, ValLoss=19.0209
+    Epoch 23: TrainAcc=0.9406, ValAcc=0.0000, ValLoss=17.3346
+    Epoch 24: TrainAcc=0.9363, ValAcc=0.0000, ValLoss=16.8813
+    Epoch 25: TrainAcc=0.9469, ValAcc=0.0000, ValLoss=19.1630
+    Epoch 26: TrainAcc=0.9554, ValAcc=0.0000, ValLoss=21.3317
+    Epoch 27: TrainAcc=0.9533, ValAcc=0.0000, ValLoss=22.3597
+    Early stopping triggered.
+ FOld 4 : Val ACC 0.0625 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 5/5 <<<
+    Original train samples: 327
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.5463, ValAcc=1.0000, ValLoss=0.1758
+    Epoch 02: TrainAcc=0.7415, ValAcc=1.0000, ValLoss=0.3017
+    Epoch 03: TrainAcc=0.8959, ValAcc=1.0000, ValLoss=0.1162
+    Epoch 04: TrainAcc=0.8894, ValAcc=1.0000, ValLoss=0.0431
+    Epoch 05: TrainAcc=0.9138, ValAcc=0.6000, ValLoss=0.5891
+    Epoch 06: TrainAcc=0.9187, ValAcc=1.0000, ValLoss=0.1718
+    Epoch 07: TrainAcc=0.9285, ValAcc=0.8000, ValLoss=0.3450
+    Epoch 08: TrainAcc=0.9382, ValAcc=0.6000, ValLoss=0.8651
+    Epoch 09: TrainAcc=0.9301, ValAcc=1.0000, ValLoss=0.0382
+    Epoch 10: TrainAcc=0.9138, ValAcc=1.0000, ValLoss=0.1613
+    Epoch 11: TrainAcc=0.9220, ValAcc=0.9000, ValLoss=0.3114
+    Epoch 12: TrainAcc=0.9382, ValAcc=0.8333, ValLoss=0.3457
+    Epoch 13: TrainAcc=0.9415, ValAcc=0.9333, ValLoss=0.2098
+    Epoch 14: TrainAcc=0.9463, ValAcc=0.9333, ValLoss=0.1277
+    Epoch 15: TrainAcc=0.9350, ValAcc=0.9333, ValLoss=0.1867
+    Epoch 16: TrainAcc=0.9333, ValAcc=0.8333, ValLoss=0.3377
+    Epoch 17: TrainAcc=0.9545, ValAcc=0.5667, ValLoss=0.7906
+    Epoch 18: TrainAcc=0.9333, ValAcc=0.9333, ValLoss=0.2320
+    Epoch 19: TrainAcc=0.9317, ValAcc=0.8000, ValLoss=0.2962
+    Epoch 20: TrainAcc=0.9496, ValAcc=0.5333, ValLoss=1.1491
+    Epoch 21: TrainAcc=0.9496, ValAcc=0.4667, ValLoss=0.7688
+    Epoch 22: TrainAcc=0.9545, ValAcc=0.9000, ValLoss=0.1956
+    Epoch 23: TrainAcc=0.9512, ValAcc=0.6000, ValLoss=0.6847
+    Epoch 24: TrainAcc=0.9740, ValAcc=1.0000, ValLoss=0.0405
+    Epoch 25: TrainAcc=0.9398, ValAcc=0.4000, ValLoss=1.3489
+    Epoch 26: TrainAcc=0.9528, ValAcc=0.9000, ValLoss=0.1494
+    Epoch 27: TrainAcc=0.9561, ValAcc=0.5000, ValLoss=0.8854
+    Epoch 28: TrainAcc=0.9610, ValAcc=0.8667, ValLoss=0.3106
+    Epoch 29: TrainAcc=0.9512, ValAcc=0.6000, ValLoss=0.5815
+    Early stopping triggered.
+[I 2025-03-29 20:49:28,880] Trial 4 finished with value: 0.19903076663220004 and parameters: {'lr': 0.0022680307647837327, 'dropout_p': 0.5, 'weight_decay': 0.000558211441847556, 'stat_dim': 64, 'comb_dim': 128, 'specaug_freq': 24, 'specaug_time': 46, 'specaug_f_masks': 1, 'specaug_t_masks': 1}. Best is trial 2 with value: 0.3042505061575033.
+    New data recall: 0.2496
+
+  === Results for Trial #4 ===
+  Avg Val Acc = 0.4300, Avg New Recall = 0.1000, Combined Score = 0.1990
+  ------------------------------------------------------------
+
+======================================================================
+Starting Optuna Trial #5 at Sat Mar 29 20:49:30 2025
+======================================================================
+Chosen hyperparams: lr=5.2e-03, dropout=0.4, wd=1.4e-04, stat_dim=32, comb_dim=64, freq_mask=17, time_mask=28, freq_masks=2, time_masks=2
+
+  >>> Fold 1/5 <<<
+    Original train samples: 200
+    Train samples after SMOTE: 261
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4598, ValAcc=0.0000, ValLoss=12.6669
+    Epoch 02: TrainAcc=0.7510, ValAcc=0.0000, ValLoss=5.2520
+    Epoch 03: TrainAcc=0.8161, ValAcc=0.0064, ValLoss=23.7110
+    Epoch 04: TrainAcc=0.8774, ValAcc=0.3121, ValLoss=3.1135
+    Epoch 05: TrainAcc=0.9387, ValAcc=0.7197, ValLoss=2.7024
+    Epoch 06: TrainAcc=0.9732, ValAcc=0.9299, ValLoss=1.5494
+    Epoch 07: TrainAcc=0.9885, ValAcc=0.3248, ValLoss=15.4082
+    Epoch 08: TrainAcc=0.9885, ValAcc=0.2420, ValLoss=22.2535
+    Epoch 09: TrainAcc=1.0000, ValAcc=0.2994, ValLoss=23.0584
+    Epoch 10: TrainAcc=0.9962, ValAcc=0.1019, ValLoss=31.0772
+    Epoch 11: TrainAcc=0.9962, ValAcc=0.0764, ValLoss=34.6973
+    Epoch 12: TrainAcc=1.0000, ValAcc=0.0828, ValLoss=36.1174
+    Epoch 13: TrainAcc=1.0000, ValAcc=0.0828, ValLoss=36.5361
+    Epoch 14: TrainAcc=0.9962, ValAcc=0.0828, ValLoss=36.3571
+    Epoch 15: TrainAcc=1.0000, ValAcc=0.1019, ValLoss=36.0481
+    Epoch 16: TrainAcc=0.9962, ValAcc=0.1210, ValLoss=35.4478
+    Epoch 17: TrainAcc=1.0000, ValAcc=0.1146, ValLoss=34.7558
+    Epoch 18: TrainAcc=1.0000, ValAcc=0.1338, ValLoss=34.4101
+    Epoch 19: TrainAcc=1.0000, ValAcc=0.1401, ValLoss=34.1028
+    Epoch 20: TrainAcc=0.9962, ValAcc=0.1592, ValLoss=30.2833
+    Epoch 21: TrainAcc=1.0000, ValAcc=0.1338, ValLoss=17.8429
+    Epoch 22: TrainAcc=0.9962, ValAcc=0.0573, ValLoss=20.1691
+    Epoch 23: TrainAcc=0.9962, ValAcc=0.3312, ValLoss=17.9485
+    Epoch 24: TrainAcc=1.0000, ValAcc=0.1975, ValLoss=30.6096
+    Epoch 25: TrainAcc=1.0000, ValAcc=0.0892, ValLoss=34.9512
+    Epoch 26: TrainAcc=1.0000, ValAcc=0.1083, ValLoss=34.6853
+    Early stopping triggered.
+    New data recall: 0.2468
+
+  >>> Fold 2/5 <<<
+    Original train samples: 292
+    Train samples after SMOTE: 410
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4878, ValAcc=0.0000, ValLoss=28.5491
+    Epoch 02: TrainAcc=0.6634, ValAcc=0.0000, ValLoss=79.0458
+    Epoch 03: TrainAcc=0.8341, ValAcc=0.0000, ValLoss=36.8280
+    Epoch 04: TrainAcc=0.8610, ValAcc=0.0000, ValLoss=20.7018
+    Epoch 05: TrainAcc=0.8854, ValAcc=0.0000, ValLoss=54.9759
+    Epoch 06: TrainAcc=0.8780, ValAcc=0.0000, ValLoss=27.9378
+    Epoch 07: TrainAcc=0.8902, ValAcc=0.0000, ValLoss=31.8624
+    Epoch 08: TrainAcc=0.8927, ValAcc=0.0000, ValLoss=38.7761
+    Epoch 09: TrainAcc=0.8951, ValAcc=0.0000, ValLoss=38.9708
+    Epoch 10: TrainAcc=0.9049, ValAcc=0.0000, ValLoss=47.7482
+    Epoch 11: TrainAcc=0.9024, ValAcc=0.0000, ValLoss=53.9199
+    Epoch 12: TrainAcc=0.9024, ValAcc=0.0000, ValLoss=59.4278
+    Epoch 13: TrainAcc=0.9073, ValAcc=0.0000, ValLoss=58.0304
+    Epoch 14: TrainAcc=0.8976, ValAcc=0.0000, ValLoss=55.8755
+    Epoch 15: TrainAcc=0.9146, ValAcc=0.0000, ValLoss=57.8126
+    Epoch 16: TrainAcc=0.9268, ValAcc=0.0000, ValLoss=61.5113
+    Epoch 17: TrainAcc=0.9244, ValAcc=0.0000, ValLoss=54.7976
+    Epoch 18: TrainAcc=0.9195, ValAcc=0.0000, ValLoss=60.3620
+    Epoch 19: TrainAcc=0.9049, ValAcc=0.0000, ValLoss=64.7592
+    Epoch 20: TrainAcc=0.9098, ValAcc=0.0000, ValLoss=71.2962
+    Epoch 21: TrainAcc=0.9268, ValAcc=0.0000, ValLoss=74.7872
+    Epoch 22: TrainAcc=0.9098, ValAcc=0.0000, ValLoss=78.0440
+    Epoch 23: TrainAcc=0.9293, ValAcc=0.0000, ValLoss=78.3856
+    Epoch 24: TrainAcc=0.9244, ValAcc=0.0000, ValLoss=81.1793
+    Early stopping triggered.
+ FOld 2 : Val ACC 0.0000 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 3/5 <<<
+    Original train samples: 300
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4602, ValAcc=1.0000, ValLoss=0.0015
+    Epoch 02: TrainAcc=0.8114, ValAcc=0.0000, ValLoss=17.3690
+    Epoch 03: TrainAcc=0.9236, ValAcc=0.0000, ValLoss=7.5694
+    Epoch 04: TrainAcc=0.9463, ValAcc=0.3158, ValLoss=3.9408
+    Epoch 05: TrainAcc=0.9626, ValAcc=0.3509, ValLoss=4.2146
+    Epoch 06: TrainAcc=0.9659, ValAcc=0.2807, ValLoss=7.6472
+    Epoch 07: TrainAcc=0.9626, ValAcc=0.3509, ValLoss=6.2437
+    Epoch 08: TrainAcc=0.9642, ValAcc=0.3158, ValLoss=4.6433
+    Epoch 09: TrainAcc=0.9675, ValAcc=0.2982, ValLoss=6.6993
+    Epoch 10: TrainAcc=0.9691, ValAcc=0.2982, ValLoss=8.6342
+    Epoch 11: TrainAcc=0.9724, ValAcc=0.3509, ValLoss=7.7695
+    Epoch 12: TrainAcc=0.9707, ValAcc=0.3509, ValLoss=4.2247
+    Epoch 13: TrainAcc=0.9659, ValAcc=0.3158, ValLoss=5.8161
+    Epoch 14: TrainAcc=0.9707, ValAcc=0.2807, ValLoss=8.5885
+    Epoch 15: TrainAcc=0.9740, ValAcc=0.2807, ValLoss=7.9856
+    Epoch 16: TrainAcc=0.9659, ValAcc=0.3333, ValLoss=7.2060
+    Epoch 17: TrainAcc=0.9691, ValAcc=0.3158, ValLoss=9.1739
+    Epoch 18: TrainAcc=0.9691, ValAcc=0.3158, ValLoss=9.0091
+    Epoch 19: TrainAcc=0.9691, ValAcc=0.2982, ValLoss=7.2354
+    Epoch 20: TrainAcc=0.9707, ValAcc=0.3158, ValLoss=8.6512
+    Epoch 21: TrainAcc=0.9707, ValAcc=0.3333, ValLoss=3.2689
+    Early stopping triggered.
+    New data recall: 0.2389
+
+  >>> Fold 4/5 <<<
+    Original train samples: 309
+    Train samples after SMOTE: 471
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.5202, ValAcc=0.0000, ValLoss=49.2538
+    Epoch 02: TrainAcc=0.7070, ValAcc=0.0000, ValLoss=23.6750
+    Epoch 03: TrainAcc=0.8493, ValAcc=0.0000, ValLoss=11.2617
+    Epoch 04: TrainAcc=0.8705, ValAcc=0.0000, ValLoss=6.6691
+    Epoch 05: TrainAcc=0.8811, ValAcc=0.0000, ValLoss=9.8192
+    Epoch 06: TrainAcc=0.8917, ValAcc=0.0000, ValLoss=12.2681
+    Epoch 07: TrainAcc=0.8917, ValAcc=0.0000, ValLoss=13.3169
+    Epoch 08: TrainAcc=0.9002, ValAcc=0.0000, ValLoss=77.1000
+    Epoch 09: TrainAcc=0.8960, ValAcc=0.0000, ValLoss=28.1331
+    Epoch 10: TrainAcc=0.9087, ValAcc=0.0000, ValLoss=12.6901
+    Epoch 11: TrainAcc=0.9002, ValAcc=0.0000, ValLoss=15.1216
+    Epoch 12: TrainAcc=0.9023, ValAcc=0.0000, ValLoss=18.4023
+    Epoch 13: TrainAcc=0.9023, ValAcc=0.0000, ValLoss=20.5137
+    Epoch 14: TrainAcc=0.9045, ValAcc=0.0417, ValLoss=11.1900
+    Epoch 15: TrainAcc=0.9151, ValAcc=0.0000, ValLoss=17.5603
+    Epoch 16: TrainAcc=0.9108, ValAcc=0.0000, ValLoss=17.3639
+    Epoch 17: TrainAcc=0.9087, ValAcc=0.0000, ValLoss=34.4734
+    Epoch 18: TrainAcc=0.8896, ValAcc=0.0000, ValLoss=28.0257
+    Epoch 19: TrainAcc=0.9087, ValAcc=0.0000, ValLoss=35.9065
+    Epoch 20: TrainAcc=0.9108, ValAcc=0.0000, ValLoss=43.7043
+    Epoch 21: TrainAcc=0.9108, ValAcc=0.0000, ValLoss=44.5767
+    Epoch 22: TrainAcc=0.9066, ValAcc=0.0000, ValLoss=40.9187
+    Epoch 23: TrainAcc=0.9151, ValAcc=0.0000, ValLoss=40.0021
+    Epoch 24: TrainAcc=0.9066, ValAcc=0.0000, ValLoss=42.2839
+    Early stopping triggered.
+ FOld 4 : Val ACC 0.0000 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 5/5 <<<
+    Original train samples: 327
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.5041, ValAcc=0.0000, ValLoss=42.5800
+    Epoch 02: TrainAcc=0.7545, ValAcc=1.0000, ValLoss=0.0585
+    Epoch 03: TrainAcc=0.8764, ValAcc=1.0000, ValLoss=0.2434
+    Epoch 04: TrainAcc=0.8862, ValAcc=1.0000, ValLoss=0.0466
+    Epoch 05: TrainAcc=0.9008, ValAcc=1.0000, ValLoss=0.0919
+    Epoch 06: TrainAcc=0.9073, ValAcc=1.0000, ValLoss=0.2042
+    Epoch 07: TrainAcc=0.9154, ValAcc=1.0000, ValLoss=0.1204
+    Epoch 08: TrainAcc=0.9171, ValAcc=1.0000, ValLoss=0.0440
+    Epoch 09: TrainAcc=0.9203, ValAcc=0.8667, ValLoss=0.4360
+    Epoch 10: TrainAcc=0.9350, ValAcc=0.9667, ValLoss=0.2386
+    Epoch 11: TrainAcc=0.9382, ValAcc=1.0000, ValLoss=0.1572
+    Epoch 12: TrainAcc=0.9301, ValAcc=1.0000, ValLoss=0.1586
+    Epoch 13: TrainAcc=0.9203, ValAcc=1.0000, ValLoss=0.1668
+    Epoch 14: TrainAcc=0.9301, ValAcc=0.9000, ValLoss=0.2089
+    Epoch 15: TrainAcc=0.9398, ValAcc=1.0000, ValLoss=0.0599
+    Epoch 16: TrainAcc=0.9350, ValAcc=1.0000, ValLoss=0.1676
+    Epoch 17: TrainAcc=0.9203, ValAcc=1.0000, ValLoss=0.0752
+    Epoch 18: TrainAcc=0.9382, ValAcc=1.0000, ValLoss=0.0085
+    Epoch 19: TrainAcc=0.9220, ValAcc=1.0000, ValLoss=0.1718
+    Epoch 20: TrainAcc=0.9285, ValAcc=0.6667, ValLoss=0.7676
+    Epoch 21: TrainAcc=0.9268, ValAcc=0.7333, ValLoss=0.4135
+    Epoch 22: TrainAcc=0.9301, ValAcc=0.8333, ValLoss=0.2936
+    Epoch 23: TrainAcc=0.9268, ValAcc=1.0000, ValLoss=0.0616
+    Epoch 24: TrainAcc=0.9268, ValAcc=1.0000, ValLoss=0.0746
+    Epoch 25: TrainAcc=0.9285, ValAcc=0.5333, ValLoss=0.4969
+    Epoch 26: TrainAcc=0.9463, ValAcc=0.7667, ValLoss=0.3023
+    Epoch 27: TrainAcc=0.9463, ValAcc=1.0000, ValLoss=0.1360
+    Epoch 28: TrainAcc=0.9398, ValAcc=1.0000, ValLoss=0.1933
+    Epoch 29: TrainAcc=0.9220, ValAcc=0.9000, ValLoss=0.3230
+    Epoch 30: TrainAcc=0.9463, ValAcc=0.6667, ValLoss=0.7751
+    Epoch 31: TrainAcc=0.9447, ValAcc=0.6333, ValLoss=0.6939
+    Epoch 32: TrainAcc=0.9528, ValAcc=0.9333, ValLoss=0.2080
+    Epoch 33: TrainAcc=0.9512, ValAcc=0.9667, ValLoss=0.1291
+    Epoch 34: TrainAcc=0.9350, ValAcc=0.8667, ValLoss=0.2357
+    Epoch 35: TrainAcc=0.9545, ValAcc=0.9667, ValLoss=0.0715
+    Epoch 36: TrainAcc=0.9317, ValAcc=1.0000, ValLoss=0.1554
+    Epoch 37: TrainAcc=0.9220, ValAcc=0.7000, ValLoss=0.3680
+    Epoch 38: TrainAcc=0.9333, ValAcc=1.0000, ValLoss=0.1926
+    Early stopping triggered.
+[I 2025-03-29 20:55:11,057] Trial 5 finished with value: 0.2783186110458434 and parameters: {'lr': 0.005203594786236904, 'dropout_p': 0.4, 'weight_decay': 0.00013793959769793147, 'stat_dim': 32, 'comb_dim': 64, 'specaug_freq': 17, 'specaug_time': 28, 'specaug_f_masks': 2, 'specaug_t_masks': 2}. Best is trial 2 with value: 0.3042505061575033.
+    New data recall: 0.2466
+
+  === Results for Trial #5 ===
+  Avg Val Acc = 0.5860, Avg New Recall = 0.1465, Combined Score = 0.2783
+  ------------------------------------------------------------
+
+======================================================================
+Starting Optuna Trial #6 at Sat Mar 29 20:55:13 2025
+======================================================================
+Chosen hyperparams: lr=1.0e-03, dropout=0.2, wd=3.9e-04, stat_dim=64, comb_dim=256, freq_mask=22, time_mask=54, freq_masks=2, time_masks=1
+
+  >>> Fold 1/5 <<<
+    Original train samples: 200
+    Train samples after SMOTE: 261
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.6284, ValAcc=0.0955, ValLoss=1.0775
+    Epoch 02: TrainAcc=0.8352, ValAcc=0.0000, ValLoss=3.7403
+    Epoch 03: TrainAcc=0.8199, ValAcc=0.0000, ValLoss=3.6155
+    Epoch 04: TrainAcc=0.8812, ValAcc=0.0127, ValLoss=2.2060
+    Epoch 05: TrainAcc=0.8812, ValAcc=0.0064, ValLoss=3.2093
+    Epoch 06: TrainAcc=0.9387, ValAcc=0.0000, ValLoss=4.3210
+    Epoch 07: TrainAcc=0.9693, ValAcc=0.0318, ValLoss=4.0358
+    Epoch 08: TrainAcc=1.0000, ValAcc=0.2420, ValLoss=2.7083
+    Epoch 09: TrainAcc=1.0000, ValAcc=0.2930, ValLoss=2.8171
+    Epoch 10: TrainAcc=0.9962, ValAcc=0.2038, ValLoss=4.0726
+    Epoch 11: TrainAcc=1.0000, ValAcc=0.1529, ValLoss=5.0618
+    Epoch 12: TrainAcc=1.0000, ValAcc=0.1210, ValLoss=5.9127
+    Epoch 13: TrainAcc=1.0000, ValAcc=0.1019, ValLoss=6.4972
+    Epoch 14: TrainAcc=0.9962, ValAcc=0.0892, ValLoss=6.8749
+    Epoch 15: TrainAcc=1.0000, ValAcc=0.0828, ValLoss=7.1084
+    Epoch 16: TrainAcc=1.0000, ValAcc=0.0764, ValLoss=7.2612
+    Epoch 17: TrainAcc=1.0000, ValAcc=0.0764, ValLoss=7.3326
+    Epoch 18: TrainAcc=1.0000, ValAcc=0.0701, ValLoss=7.4095
+    Epoch 19: TrainAcc=1.0000, ValAcc=0.0764, ValLoss=7.4066
+    Epoch 20: TrainAcc=1.0000, ValAcc=0.0573, ValLoss=7.4327
+    Epoch 21: TrainAcc=1.0000, ValAcc=0.0764, ValLoss=7.4197
+    Early stopping triggered.
+ FOld 1 : Val ACC 0.0955 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 2/5 <<<
+    Original train samples: 292
+    Train samples after SMOTE: 410
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.5024, ValAcc=0.0000, ValLoss=5.1964
+    Epoch 02: TrainAcc=0.6488, ValAcc=0.0000, ValLoss=5.0544
+    Epoch 03: TrainAcc=0.7683, ValAcc=0.0000, ValLoss=10.6204
+    Epoch 04: TrainAcc=0.8171, ValAcc=0.0000, ValLoss=14.2818
+    Epoch 05: TrainAcc=0.8902, ValAcc=0.0000, ValLoss=18.5957
+    Epoch 06: TrainAcc=0.8976, ValAcc=0.0000, ValLoss=20.6042
+    Epoch 07: TrainAcc=0.9146, ValAcc=0.0000, ValLoss=17.7564
+    Epoch 08: TrainAcc=0.9171, ValAcc=0.0000, ValLoss=20.2003
+    Epoch 09: TrainAcc=0.9024, ValAcc=0.0000, ValLoss=16.8488
+    Epoch 10: TrainAcc=0.9244, ValAcc=0.0000, ValLoss=15.5982
+    Epoch 11: TrainAcc=0.9293, ValAcc=0.0000, ValLoss=15.0774
+    Epoch 12: TrainAcc=0.9220, ValAcc=0.0000, ValLoss=15.2434
+    Epoch 13: TrainAcc=0.9244, ValAcc=0.0000, ValLoss=16.7340
+    Epoch 14: TrainAcc=0.9463, ValAcc=0.0000, ValLoss=19.1674
+    Epoch 15: TrainAcc=0.9415, ValAcc=0.0000, ValLoss=20.2256
+    Epoch 16: TrainAcc=0.9561, ValAcc=0.0000, ValLoss=21.6051
+    Epoch 17: TrainAcc=0.9512, ValAcc=0.0000, ValLoss=20.1078
+    Epoch 18: TrainAcc=0.9415, ValAcc=0.0000, ValLoss=18.8405
+    Epoch 19: TrainAcc=0.9463, ValAcc=0.0000, ValLoss=20.2910
+    Epoch 20: TrainAcc=0.9488, ValAcc=0.0000, ValLoss=21.3244
+    Epoch 21: TrainAcc=0.9610, ValAcc=0.0000, ValLoss=22.2262
+    Epoch 22: TrainAcc=0.9561, ValAcc=0.0000, ValLoss=22.6906
+    Early stopping triggered.
+ FOld 2 : Val ACC 0.0000 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 3/5 <<<
+    Original train samples: 300
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4472, ValAcc=1.0000, ValLoss=0.7457
+    Epoch 02: TrainAcc=0.6927, ValAcc=0.9825, ValLoss=0.3066
+    Epoch 03: TrainAcc=0.8569, ValAcc=0.5789, ValLoss=0.8490
+    Epoch 04: TrainAcc=0.9496, ValAcc=0.3333, ValLoss=2.2118
+    Epoch 05: TrainAcc=0.9528, ValAcc=0.4035, ValLoss=1.6352
+    Epoch 06: TrainAcc=0.9642, ValAcc=0.3158, ValLoss=2.8185
+    Epoch 07: TrainAcc=0.9659, ValAcc=0.2807, ValLoss=3.5278
+    Epoch 08: TrainAcc=0.9659, ValAcc=0.2807, ValLoss=3.1633
+    Epoch 09: TrainAcc=0.9691, ValAcc=0.3158, ValLoss=2.7303
+    Epoch 10: TrainAcc=0.9675, ValAcc=0.2807, ValLoss=4.3468
+    Epoch 11: TrainAcc=0.9642, ValAcc=0.2982, ValLoss=3.6880
+    Epoch 12: TrainAcc=0.9691, ValAcc=0.2807, ValLoss=4.9245
+    Epoch 13: TrainAcc=0.9756, ValAcc=0.3158, ValLoss=4.2324
+    Epoch 14: TrainAcc=0.9724, ValAcc=0.3333, ValLoss=3.4999
+    Epoch 15: TrainAcc=0.9772, ValAcc=0.2807, ValLoss=4.7517
+    Epoch 16: TrainAcc=0.9740, ValAcc=0.2982, ValLoss=5.6293
+    Epoch 17: TrainAcc=0.9805, ValAcc=0.2982, ValLoss=6.0483
+    Epoch 18: TrainAcc=0.9740, ValAcc=0.3158, ValLoss=5.0809
+    Epoch 19: TrainAcc=0.9756, ValAcc=0.2982, ValLoss=5.5588
+    Epoch 20: TrainAcc=0.9740, ValAcc=0.2632, ValLoss=5.6518
+    Epoch 21: TrainAcc=0.9724, ValAcc=0.3158, ValLoss=5.5144
+    Epoch 22: TrainAcc=0.9740, ValAcc=0.2982, ValLoss=6.0960
+    Early stopping triggered.
+    New data recall: 0.2576
+
+  >>> Fold 4/5 <<<
+    Original train samples: 309
+    Train samples after SMOTE: 471
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4628, ValAcc=0.7500, ValLoss=0.9603
+    Epoch 02: TrainAcc=0.6900, ValAcc=0.0000, ValLoss=4.9427
+    Epoch 03: TrainAcc=0.8047, ValAcc=0.0000, ValLoss=7.4928
+    Epoch 04: TrainAcc=0.8726, ValAcc=0.0000, ValLoss=6.7804
+    Epoch 05: TrainAcc=0.8938, ValAcc=0.0000, ValLoss=5.8608
+    Epoch 06: TrainAcc=0.9193, ValAcc=0.0000, ValLoss=6.2520
+    Epoch 07: TrainAcc=0.9130, ValAcc=0.0000, ValLoss=7.7343
+    Epoch 08: TrainAcc=0.9278, ValAcc=0.0000, ValLoss=8.6248
+    Epoch 09: TrainAcc=0.9278, ValAcc=0.0000, ValLoss=9.5204
+    Epoch 10: TrainAcc=0.9533, ValAcc=0.0000, ValLoss=8.9906
+    Epoch 11: TrainAcc=0.9682, ValAcc=0.0000, ValLoss=8.8642
+    Epoch 12: TrainAcc=0.9575, ValAcc=0.0000, ValLoss=7.7270
+    Epoch 13: TrainAcc=0.9618, ValAcc=0.0000, ValLoss=7.0398
+    Epoch 14: TrainAcc=0.9682, ValAcc=0.0000, ValLoss=8.6459
+    Epoch 15: TrainAcc=0.9618, ValAcc=0.0000, ValLoss=8.3604
+    Epoch 16: TrainAcc=0.9618, ValAcc=0.0000, ValLoss=9.6716
+    Epoch 17: TrainAcc=0.9597, ValAcc=0.0000, ValLoss=10.4023
+    Epoch 18: TrainAcc=0.9766, ValAcc=0.0000, ValLoss=10.4486
+    Epoch 19: TrainAcc=0.9682, ValAcc=0.0000, ValLoss=10.5383
+    Epoch 20: TrainAcc=0.9575, ValAcc=0.0000, ValLoss=11.5367
+    Epoch 21: TrainAcc=0.9490, ValAcc=0.0000, ValLoss=11.1872
+    Early stopping triggered.
+ FOld 4 : Val ACC 0.7500 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 5/5 <<<
+    Original train samples: 327
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4748, ValAcc=0.3333, ValLoss=1.1217
+    Epoch 02: TrainAcc=0.6683, ValAcc=1.0000, ValLoss=0.2245
+    Epoch 03: TrainAcc=0.8276, ValAcc=1.0000, ValLoss=0.0418
+    Epoch 04: TrainAcc=0.9024, ValAcc=1.0000, ValLoss=0.0418
+    Epoch 05: TrainAcc=0.9333, ValAcc=0.8000, ValLoss=0.2943
+    Epoch 06: TrainAcc=0.9350, ValAcc=0.7000, ValLoss=0.4036
+    Epoch 07: TrainAcc=0.9528, ValAcc=0.5667, ValLoss=0.9673
+    Epoch 08: TrainAcc=0.9561, ValAcc=1.0000, ValLoss=0.0218
+    Epoch 09: TrainAcc=0.9642, ValAcc=0.7667, ValLoss=0.3989
+    Epoch 10: TrainAcc=0.9642, ValAcc=0.7333, ValLoss=0.4636
+    Epoch 11: TrainAcc=0.9707, ValAcc=0.6333, ValLoss=1.0811
+    Epoch 12: TrainAcc=0.9707, ValAcc=0.7000, ValLoss=0.8721
+    Epoch 13: TrainAcc=0.9740, ValAcc=0.8333, ValLoss=0.3043
+    Epoch 14: TrainAcc=0.9642, ValAcc=0.5000, ValLoss=1.1535
+    Epoch 15: TrainAcc=0.9740, ValAcc=0.7333, ValLoss=0.5019
+    Epoch 16: TrainAcc=0.9724, ValAcc=0.5667, ValLoss=1.4025
+    Epoch 17: TrainAcc=0.9805, ValAcc=0.6000, ValLoss=0.7790
+    Epoch 18: TrainAcc=0.9740, ValAcc=0.6667, ValLoss=0.8430
+    Epoch 19: TrainAcc=0.9805, ValAcc=0.4667, ValLoss=1.5806
+    Epoch 20: TrainAcc=0.9805, ValAcc=0.5667, ValLoss=1.3029
+    Epoch 21: TrainAcc=0.9886, ValAcc=0.7000, ValLoss=0.6698
+    Epoch 22: TrainAcc=0.9691, ValAcc=0.5000, ValLoss=1.5160
+    Epoch 23: TrainAcc=0.9886, ValAcc=0.5667, ValLoss=0.9877
+    Epoch 24: TrainAcc=0.9724, ValAcc=0.4667, ValLoss=1.9858
+    Epoch 25: TrainAcc=0.9772, ValAcc=0.5667, ValLoss=1.0552
+    Epoch 26: TrainAcc=0.9772, ValAcc=0.6667, ValLoss=0.7296
+    Epoch 27: TrainAcc=0.9805, ValAcc=0.5000, ValLoss=1.3622
+    Epoch 28: TrainAcc=0.9821, ValAcc=0.7333, ValLoss=0.7210
+    Early stopping triggered.
+[I 2025-03-29 21:00:04,588] Trial 6 pruned. 
+    New data recall: 0.2561
+
+  === Results for Trial #6 ===
+  Avg Val Acc = 0.5656, Avg New Recall = 0.1027, Combined Score = 0.2416
+  ------------------------------------------------------------
+  Trial pruned by Optuna.
+
+======================================================================
+Starting Optuna Trial #7 at Sat Mar 29 21:00:06 2025
+======================================================================
+Chosen hyperparams: lr=1.1e-04, dropout=0.2, wd=1.3e-05, stat_dim=32, comb_dim=128, freq_mask=25, time_mask=45, freq_masks=2, time_masks=2
+
+  >>> Fold 1/5 <<<
+    Original train samples: 200
+    Train samples after SMOTE: 261
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3525, ValAcc=0.0000, ValLoss=1.2780
+    Epoch 02: TrainAcc=0.5019, ValAcc=0.0000, ValLoss=1.2203
+    Epoch 03: TrainAcc=0.5632, ValAcc=0.0000, ValLoss=1.2134
+    Epoch 04: TrainAcc=0.6245, ValAcc=0.0000, ValLoss=1.2007
+    Epoch 05: TrainAcc=0.6628, ValAcc=0.0000, ValLoss=1.2015
+    Epoch 06: TrainAcc=0.6820, ValAcc=0.0000, ValLoss=1.2230
+    Epoch 07: TrainAcc=0.7280, ValAcc=0.0000, ValLoss=1.2517
+    Epoch 08: TrainAcc=0.7625, ValAcc=0.0000, ValLoss=1.3727
+    Epoch 09: TrainAcc=0.8008, ValAcc=0.0000, ValLoss=1.5156
+    Epoch 10: TrainAcc=0.8276, ValAcc=0.0000, ValLoss=1.6597
+    Epoch 11: TrainAcc=0.8238, ValAcc=0.0000, ValLoss=1.7953
+    Epoch 12: TrainAcc=0.8314, ValAcc=0.0000, ValLoss=1.9306
+    Epoch 13: TrainAcc=0.8046, ValAcc=0.0127, ValLoss=1.8866
+    Epoch 14: TrainAcc=0.8084, ValAcc=0.0510, ValLoss=1.6838
+    Epoch 15: TrainAcc=0.8314, ValAcc=0.0637, ValLoss=1.6463
+    Epoch 16: TrainAcc=0.8391, ValAcc=0.0637, ValLoss=1.6730
+    Epoch 17: TrainAcc=0.8429, ValAcc=0.0127, ValLoss=1.8892
+    Epoch 18: TrainAcc=0.8352, ValAcc=0.0000, ValLoss=2.2458
+    Epoch 19: TrainAcc=0.8391, ValAcc=0.0127, ValLoss=2.3854
+    Epoch 20: TrainAcc=0.8391, ValAcc=0.0127, ValLoss=2.5037
+    Epoch 21: TrainAcc=0.8506, ValAcc=0.0127, ValLoss=2.4538
+    Epoch 22: TrainAcc=0.8429, ValAcc=0.0127, ValLoss=2.3763
+    Epoch 23: TrainAcc=0.8506, ValAcc=0.0191, ValLoss=2.3817
+    Epoch 24: TrainAcc=0.8506, ValAcc=0.0318, ValLoss=2.2235
+    Early stopping triggered.
+ FOld 1 : Val ACC 0.0000 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 2/5 <<<
+    Original train samples: 292
+    Train samples after SMOTE: 410
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3878, ValAcc=0.0308, ValLoss=1.1176
+    Epoch 02: TrainAcc=0.5024, ValAcc=0.0000, ValLoss=1.3696
+    Epoch 03: TrainAcc=0.4951, ValAcc=0.0000, ValLoss=1.8572
+    Epoch 04: TrainAcc=0.5195, ValAcc=0.0000, ValLoss=2.1184
+    Epoch 05: TrainAcc=0.5244, ValAcc=0.0000, ValLoss=2.4156
+    Epoch 06: TrainAcc=0.5171, ValAcc=0.0000, ValLoss=2.6117
+    Epoch 07: TrainAcc=0.5073, ValAcc=0.0000, ValLoss=3.1241
+    Epoch 08: TrainAcc=0.5122, ValAcc=0.0000, ValLoss=3.6672
+    Epoch 09: TrainAcc=0.5439, ValAcc=0.0000, ValLoss=4.0822
+    Epoch 10: TrainAcc=0.5829, ValAcc=0.0000, ValLoss=4.0790
+    Epoch 11: TrainAcc=0.5878, ValAcc=0.0000, ValLoss=3.9826
+    Epoch 12: TrainAcc=0.6024, ValAcc=0.0000, ValLoss=3.9369
+    Epoch 13: TrainAcc=0.6268, ValAcc=0.0000, ValLoss=3.9857
+    Epoch 14: TrainAcc=0.6683, ValAcc=0.0000, ValLoss=3.9398
+    Epoch 15: TrainAcc=0.6561, ValAcc=0.0000, ValLoss=3.7202
+    Epoch 16: TrainAcc=0.7024, ValAcc=0.0000, ValLoss=3.6413
+    Epoch 17: TrainAcc=0.6634, ValAcc=0.0000, ValLoss=3.6557
+    Epoch 18: TrainAcc=0.6976, ValAcc=0.0000, ValLoss=3.3796
+    Epoch 19: TrainAcc=0.7244, ValAcc=0.0000, ValLoss=3.2484
+    Epoch 20: TrainAcc=0.7585, ValAcc=0.0000, ValLoss=3.3816
+    Epoch 21: TrainAcc=0.7610, ValAcc=0.0000, ValLoss=3.4504
+    Early stopping triggered.
+ FOld 2 : Val ACC 0.0308 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 3/5 <<<
+    Original train samples: 300
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3854, ValAcc=0.0000, ValLoss=1.2138
+    Epoch 02: TrainAcc=0.4341, ValAcc=0.0351, ValLoss=1.1182
+    Epoch 03: TrainAcc=0.4569, ValAcc=0.5789, ValLoss=0.9861
+    Epoch 04: TrainAcc=0.4569, ValAcc=0.8421, ValLoss=0.8912
+    Epoch 05: TrainAcc=0.4862, ValAcc=0.9825, ValLoss=0.8214
+    Epoch 06: TrainAcc=0.4927, ValAcc=1.0000, ValLoss=0.7560
+    Epoch 07: TrainAcc=0.4878, ValAcc=1.0000, ValLoss=0.7058
+    Epoch 08: TrainAcc=0.5252, ValAcc=1.0000, ValLoss=0.6405
+    Epoch 09: TrainAcc=0.5366, ValAcc=1.0000, ValLoss=0.6107
+    Epoch 10: TrainAcc=0.5707, ValAcc=1.0000, ValLoss=0.5779
+    Epoch 11: TrainAcc=0.6065, ValAcc=0.9825, ValLoss=0.5646
+    Epoch 12: TrainAcc=0.6211, ValAcc=0.9649, ValLoss=0.5569
+    Epoch 13: TrainAcc=0.6488, ValAcc=0.9649, ValLoss=0.5056
+    Epoch 14: TrainAcc=0.6732, ValAcc=0.9298, ValLoss=0.4981
+    Epoch 15: TrainAcc=0.6780, ValAcc=0.9298, ValLoss=0.4814
+    Epoch 16: TrainAcc=0.6911, ValAcc=0.8772, ValLoss=0.5180
+    Epoch 17: TrainAcc=0.7252, ValAcc=0.8246, ValLoss=0.5353
+    Epoch 18: TrainAcc=0.7431, ValAcc=0.7544, ValLoss=0.6350
+    Epoch 19: TrainAcc=0.7545, ValAcc=0.7193, ValLoss=0.6453
+    Epoch 20: TrainAcc=0.7821, ValAcc=0.6842, ValLoss=0.6746
+    Epoch 21: TrainAcc=0.7854, ValAcc=0.6667, ValLoss=0.7008
+    Epoch 22: TrainAcc=0.7935, ValAcc=0.4912, ValLoss=0.9719
+    Epoch 23: TrainAcc=0.8488, ValAcc=0.3509, ValLoss=1.1863
+    Epoch 24: TrainAcc=0.8715, ValAcc=0.3509, ValLoss=1.2472
+    Epoch 25: TrainAcc=0.8748, ValAcc=0.3684, ValLoss=1.1633
+    Epoch 26: TrainAcc=0.8846, ValAcc=0.3684, ValLoss=1.2507
+    Epoch 27: TrainAcc=0.8959, ValAcc=0.3860, ValLoss=1.0764
+    Epoch 28: TrainAcc=0.9154, ValAcc=0.3509, ValLoss=1.2867
+    Epoch 29: TrainAcc=0.9187, ValAcc=0.2982, ValLoss=1.5743
+    Epoch 30: TrainAcc=0.9220, ValAcc=0.3158, ValLoss=1.4815
+    Epoch 31: TrainAcc=0.9350, ValAcc=0.3860, ValLoss=1.3165
+    Epoch 32: TrainAcc=0.9366, ValAcc=0.3158, ValLoss=1.6173
+    Epoch 33: TrainAcc=0.9333, ValAcc=0.4386, ValLoss=1.0886
+    Epoch 34: TrainAcc=0.9415, ValAcc=0.4561, ValLoss=1.0636
+    Epoch 35: TrainAcc=0.9463, ValAcc=0.3158, ValLoss=1.7784
+    Early stopping triggered.
+    New data recall: 0.2592
+
+  >>> Fold 4/5 <<<
+    Original train samples: 309
+    Train samples after SMOTE: 471
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3567, ValAcc=0.9792, ValLoss=1.0371
+    Epoch 02: TrainAcc=0.4459, ValAcc=0.2083, ValLoss=1.1068
+    Epoch 03: TrainAcc=0.5287, ValAcc=0.0208, ValLoss=1.3726
+    Epoch 04: TrainAcc=0.5669, ValAcc=0.0000, ValLoss=1.5542
+    Epoch 05: TrainAcc=0.5648, ValAcc=0.0000, ValLoss=1.6540
+    Epoch 06: TrainAcc=0.5817, ValAcc=0.0000, ValLoss=1.6697
+    Epoch 07: TrainAcc=0.6072, ValAcc=0.0000, ValLoss=1.7088
+    Epoch 08: TrainAcc=0.6157, ValAcc=0.0000, ValLoss=2.0105
+    Epoch 09: TrainAcc=0.6412, ValAcc=0.0000, ValLoss=2.3855
+    Epoch 10: TrainAcc=0.6221, ValAcc=0.0000, ValLoss=2.7063
+    Epoch 11: TrainAcc=0.6539, ValAcc=0.0000, ValLoss=2.8402
+    Epoch 12: TrainAcc=0.6667, ValAcc=0.0000, ValLoss=2.6949
+    Epoch 13: TrainAcc=0.7070, ValAcc=0.0000, ValLoss=2.6367
+    Epoch 14: TrainAcc=0.6964, ValAcc=0.0000, ValLoss=2.6658
+    Epoch 15: TrainAcc=0.7006, ValAcc=0.0000, ValLoss=2.8013
+    Epoch 16: TrainAcc=0.7197, ValAcc=0.0000, ValLoss=2.7675
+    Epoch 17: TrainAcc=0.7665, ValAcc=0.0000, ValLoss=2.5793
+    Epoch 18: TrainAcc=0.7686, ValAcc=0.0000, ValLoss=2.7033
+    Epoch 19: TrainAcc=0.7686, ValAcc=0.0000, ValLoss=3.1101
+    Epoch 20: TrainAcc=0.7834, ValAcc=0.0000, ValLoss=3.0653
+    Epoch 21: TrainAcc=0.7877, ValAcc=0.0000, ValLoss=3.4019
+    Early stopping triggered.
+    New data recall: 0.3116
+
+  >>> Fold 5/5 <<<
+    Original train samples: 327
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3805, ValAcc=0.0333, ValLoss=1.0962
+    Epoch 02: TrainAcc=0.3870, ValAcc=0.7667, ValLoss=1.0341
+    Epoch 03: TrainAcc=0.4374, ValAcc=0.8667, ValLoss=0.9199
+    Epoch 04: TrainAcc=0.4341, ValAcc=0.9333, ValLoss=0.8203
+    Epoch 05: TrainAcc=0.4959, ValAcc=0.9667, ValLoss=0.7044
+    Epoch 06: TrainAcc=0.4813, ValAcc=0.9667, ValLoss=0.6715
+    Epoch 07: TrainAcc=0.5154, ValAcc=0.9667, ValLoss=0.7036
+    Epoch 08: TrainAcc=0.5285, ValAcc=0.9667, ValLoss=0.6622
+    Epoch 09: TrainAcc=0.5740, ValAcc=0.9667, ValLoss=0.6636
+    Epoch 10: TrainAcc=0.5967, ValAcc=0.9667, ValLoss=0.6011
+    Epoch 11: TrainAcc=0.6016, ValAcc=0.9667, ValLoss=0.5492
+    Epoch 12: TrainAcc=0.6488, ValAcc=0.9667, ValLoss=0.5006
+    Epoch 13: TrainAcc=0.6569, ValAcc=1.0000, ValLoss=0.4192
+    Epoch 14: TrainAcc=0.6829, ValAcc=1.0000, ValLoss=0.3557
+    Epoch 15: TrainAcc=0.6862, ValAcc=1.0000, ValLoss=0.3837
+    Epoch 16: TrainAcc=0.7138, ValAcc=1.0000, ValLoss=0.3693
+    Epoch 17: TrainAcc=0.7220, ValAcc=1.0000, ValLoss=0.3462
+    Epoch 18: TrainAcc=0.7398, ValAcc=1.0000, ValLoss=0.2868
+    Epoch 19: TrainAcc=0.7724, ValAcc=1.0000, ValLoss=0.2170
+    Epoch 20: TrainAcc=0.7837, ValAcc=1.0000, ValLoss=0.2305
+    Epoch 21: TrainAcc=0.8195, ValAcc=1.0000, ValLoss=0.2421
+    Epoch 22: TrainAcc=0.8293, ValAcc=1.0000, ValLoss=0.2424
+    Epoch 23: TrainAcc=0.8439, ValAcc=1.0000, ValLoss=0.2285
+    Epoch 24: TrainAcc=0.8585, ValAcc=1.0000, ValLoss=0.1958
+    Epoch 25: TrainAcc=0.8634, ValAcc=1.0000, ValLoss=0.2018
+    Epoch 26: TrainAcc=0.8829, ValAcc=1.0000, ValLoss=0.2086
+    Epoch 27: TrainAcc=0.8911, ValAcc=0.9667, ValLoss=0.2569
+    Epoch 28: TrainAcc=0.8780, ValAcc=0.9333, ValLoss=0.2506
+    Epoch 29: TrainAcc=0.8813, ValAcc=0.9333, ValLoss=0.2749
+    Epoch 30: TrainAcc=0.8829, ValAcc=0.9000, ValLoss=0.2747
+    Epoch 31: TrainAcc=0.8976, ValAcc=0.8000, ValLoss=0.3633
+    Epoch 32: TrainAcc=0.9106, ValAcc=0.8000, ValLoss=0.3560
+    Epoch 33: TrainAcc=0.8976, ValAcc=0.8333, ValLoss=0.3333
+    Epoch 34: TrainAcc=0.8992, ValAcc=0.7000, ValLoss=0.4266
+    Epoch 35: TrainAcc=0.9041, ValAcc=0.6333, ValLoss=0.4247
+    Epoch 36: TrainAcc=0.9171, ValAcc=0.6667, ValLoss=0.4626
+    Epoch 37: TrainAcc=0.9268, ValAcc=0.7333, ValLoss=0.4438
+    Epoch 38: TrainAcc=0.9252, ValAcc=0.6333, ValLoss=0.5778
+    Epoch 39: TrainAcc=0.9350, ValAcc=0.6000, ValLoss=0.7447
+    Epoch 40: TrainAcc=0.9382, ValAcc=0.6000, ValLoss=0.7345
+    Epoch 41: TrainAcc=0.9285, ValAcc=0.6333, ValLoss=0.6213
+    Epoch 42: TrainAcc=0.9252, ValAcc=0.6333, ValLoss=0.6277
+    Epoch 43: TrainAcc=0.9236, ValAcc=0.6333, ValLoss=0.6307
+    Epoch 44: TrainAcc=0.9350, ValAcc=0.5667, ValLoss=1.0206
+    Early stopping triggered.
+    New data recall: 0.2639
+
+  === Results for Trial #7 ===
+  Avg Val Acc = 0.5880, Avg New Recall = 0.1670, Combined Score = 0.2933
+  ------------------------------------------------------------
+[I 2025-03-29 21:06:27,174] Trial 7 finished with value: 0.29325391156714287 and parameters: {'lr': 0.0001065197314611739, 'dropout_p': 0.2, 'weight_decay': 1.3359513113683016e-05, 'stat_dim': 32, 'comb_dim': 128, 'specaug_freq': 25, 'specaug_time': 45, 'specaug_f_masks': 2, 'specaug_t_masks': 2}. Best is trial 2 with value: 0.3042505061575033.
+
+======================================================================
+Starting Optuna Trial #8 at Sat Mar 29 21:06:29 2025
+======================================================================
+Chosen hyperparams: lr=2.0e-04, dropout=0.2, wd=1.4e-04, stat_dim=128, comb_dim=256, freq_mask=29, time_mask=29, freq_masks=1, time_masks=2
+
+  >>> Fold 1/5 <<<
+    Original train samples: 200
+    Train samples after SMOTE: 261
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3985, ValAcc=0.2548, ValLoss=1.1040
+    Epoch 02: TrainAcc=0.6705, ValAcc=0.3248, ValLoss=1.0663
+    Epoch 03: TrainAcc=0.7816, ValAcc=0.0000, ValLoss=1.1906
+    Epoch 04: TrainAcc=0.8238, ValAcc=0.0000, ValLoss=1.7221
+    Epoch 05: TrainAcc=0.8314, ValAcc=0.0000, ValLoss=2.5024
+    Epoch 06: TrainAcc=0.8314, ValAcc=0.0000, ValLoss=2.4995
+    Epoch 07: TrainAcc=0.8276, ValAcc=0.0000, ValLoss=2.1959
+    Epoch 08: TrainAcc=0.8429, ValAcc=0.0000, ValLoss=1.9246
+    Epoch 09: TrainAcc=0.8429, ValAcc=0.0127, ValLoss=1.8216
+    Epoch 10: TrainAcc=0.8506, ValAcc=0.0318, ValLoss=1.9673
+    Epoch 11: TrainAcc=0.8697, ValAcc=0.0191, ValLoss=2.4476
+    Epoch 12: TrainAcc=0.8966, ValAcc=0.0191, ValLoss=2.6905
+    Epoch 13: TrainAcc=0.8851, ValAcc=0.0191, ValLoss=2.8635
+    Epoch 14: TrainAcc=0.9119, ValAcc=0.0127, ValLoss=3.1879
+    Epoch 15: TrainAcc=0.9195, ValAcc=0.0064, ValLoss=3.6681
+    Epoch 16: TrainAcc=0.9425, ValAcc=0.0000, ValLoss=4.0284
+    Epoch 17: TrainAcc=0.9732, ValAcc=0.0000, ValLoss=4.0524
+    Epoch 18: TrainAcc=0.9923, ValAcc=0.0064, ValLoss=3.9840
+    Epoch 19: TrainAcc=0.9962, ValAcc=0.0064, ValLoss=3.9239
+    Epoch 20: TrainAcc=1.0000, ValAcc=0.0064, ValLoss=3.9855
+    Epoch 21: TrainAcc=1.0000, ValAcc=0.0064, ValLoss=3.9316
+    Epoch 22: TrainAcc=1.0000, ValAcc=0.0064, ValLoss=4.0262
+    Early stopping triggered.
+ FOld 1 : Val ACC 0.3248 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 2/5 <<<
+    Original train samples: 292
+    Train samples after SMOTE: 410
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4854, ValAcc=0.5385, ValLoss=1.0657
+    Epoch 02: TrainAcc=0.5659, ValAcc=0.0000, ValLoss=2.6700
+    Epoch 03: TrainAcc=0.6000, ValAcc=0.0000, ValLoss=3.6647
+    Epoch 04: TrainAcc=0.6220, ValAcc=0.0000, ValLoss=4.6476
+    Epoch 05: TrainAcc=0.7463, ValAcc=0.0000, ValLoss=5.2342
+    Epoch 06: TrainAcc=0.7659, ValAcc=0.0000, ValLoss=5.4514
+    Epoch 07: TrainAcc=0.8268, ValAcc=0.0000, ValLoss=5.5806
+    Epoch 08: TrainAcc=0.8780, ValAcc=0.0000, ValLoss=5.4182
+    Epoch 09: TrainAcc=0.8829, ValAcc=0.0000, ValLoss=5.2876
+    Epoch 10: TrainAcc=0.9049, ValAcc=0.0000, ValLoss=5.4522
+    Epoch 11: TrainAcc=0.9024, ValAcc=0.0000, ValLoss=5.8013
+    Epoch 12: TrainAcc=0.9171, ValAcc=0.0000, ValLoss=6.4696
+    Epoch 13: TrainAcc=0.9122, ValAcc=0.0000, ValLoss=6.9823
+    Epoch 14: TrainAcc=0.9171, ValAcc=0.0000, ValLoss=7.1078
+    Epoch 15: TrainAcc=0.9317, ValAcc=0.0000, ValLoss=7.4264
+    Epoch 16: TrainAcc=0.9268, ValAcc=0.0000, ValLoss=7.7682
+    Epoch 17: TrainAcc=0.9268, ValAcc=0.0000, ValLoss=7.9652
+    Epoch 18: TrainAcc=0.9415, ValAcc=0.0000, ValLoss=8.5660
+    Epoch 19: TrainAcc=0.9537, ValAcc=0.0000, ValLoss=9.0217
+    Epoch 20: TrainAcc=0.9585, ValAcc=0.0000, ValLoss=9.5250
+    Epoch 21: TrainAcc=0.9439, ValAcc=0.0000, ValLoss=9.9063
+    Early stopping triggered.
+ FOld 2 : Val ACC 0.5385 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 3/5 <<<
+    Original train samples: 300
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4715, ValAcc=0.1228, ValLoss=1.0842
+    Epoch 02: TrainAcc=0.5789, ValAcc=1.0000, ValLoss=0.7541
+    Epoch 03: TrainAcc=0.6325, ValAcc=1.0000, ValLoss=0.4935
+    Epoch 04: TrainAcc=0.7008, ValAcc=1.0000, ValLoss=0.3451
+    Epoch 05: TrainAcc=0.7772, ValAcc=0.8596, ValLoss=0.4292
+    Epoch 06: TrainAcc=0.8764, ValAcc=0.4211, ValLoss=0.9795
+    Epoch 07: TrainAcc=0.9512, ValAcc=0.3860, ValLoss=1.4013
+    Epoch 08: TrainAcc=0.9593, ValAcc=0.2982, ValLoss=1.9814
+    Epoch 09: TrainAcc=0.9691, ValAcc=0.2807, ValLoss=2.5874
+    Epoch 10: TrainAcc=0.9610, ValAcc=0.2982, ValLoss=2.2945
+    Epoch 11: TrainAcc=0.9659, ValAcc=0.2807, ValLoss=3.0053
+    Epoch 12: TrainAcc=0.9724, ValAcc=0.2807, ValLoss=2.9334
+    Epoch 13: TrainAcc=0.9805, ValAcc=0.2807, ValLoss=2.7136
+    Epoch 14: TrainAcc=0.9707, ValAcc=0.2632, ValLoss=3.7858
+    Epoch 15: TrainAcc=0.9756, ValAcc=0.2807, ValLoss=3.2582
+    Epoch 16: TrainAcc=0.9837, ValAcc=0.2632, ValLoss=4.1863
+    Epoch 17: TrainAcc=0.9772, ValAcc=0.2632, ValLoss=3.4803
+    Epoch 18: TrainAcc=0.9886, ValAcc=0.2632, ValLoss=3.3185
+    Epoch 19: TrainAcc=0.9837, ValAcc=0.2632, ValLoss=3.7996
+    Epoch 20: TrainAcc=0.9886, ValAcc=0.2807, ValLoss=3.3814
+    Epoch 21: TrainAcc=0.9724, ValAcc=0.2807, ValLoss=3.9171
+    Epoch 22: TrainAcc=0.9837, ValAcc=0.2807, ValLoss=3.9857
+    Epoch 23: TrainAcc=0.9854, ValAcc=0.2982, ValLoss=3.3666
+    Epoch 24: TrainAcc=0.9870, ValAcc=0.2807, ValLoss=4.1784
+    Early stopping triggered.
+    New data recall: 0.2656
+
+  >>> Fold 4/5 <<<
+    Original train samples: 309
+    Train samples after SMOTE: 471
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3609, ValAcc=1.0000, ValLoss=1.0298
+    Epoch 02: TrainAcc=0.6051, ValAcc=0.0208, ValLoss=1.2153
+    Epoch 03: TrainAcc=0.6391, ValAcc=0.0000, ValLoss=2.0948
+    Epoch 04: TrainAcc=0.7091, ValAcc=0.0000, ValLoss=2.8211
+    Epoch 05: TrainAcc=0.7728, ValAcc=0.0000, ValLoss=3.4010
+    Epoch 06: TrainAcc=0.8153, ValAcc=0.0000, ValLoss=3.8465
+    Epoch 07: TrainAcc=0.8450, ValAcc=0.0000, ValLoss=3.3843
+    Epoch 08: TrainAcc=0.8620, ValAcc=0.0000, ValLoss=3.4021
+    Epoch 09: TrainAcc=0.8832, ValAcc=0.0000, ValLoss=3.7075
+    Epoch 10: TrainAcc=0.9130, ValAcc=0.0000, ValLoss=4.1222
+    Epoch 11: TrainAcc=0.9023, ValAcc=0.0000, ValLoss=4.2335
+    Epoch 12: TrainAcc=0.9172, ValAcc=0.0000, ValLoss=3.4129
+    Epoch 13: TrainAcc=0.9342, ValAcc=0.0000, ValLoss=3.4549
+    Epoch 14: TrainAcc=0.9321, ValAcc=0.0000, ValLoss=4.0233
+    Epoch 15: TrainAcc=0.9321, ValAcc=0.0000, ValLoss=4.3997
+    Epoch 16: TrainAcc=0.9469, ValAcc=0.0000, ValLoss=4.2109
+    Epoch 17: TrainAcc=0.9512, ValAcc=0.0000, ValLoss=4.2340
+    Epoch 18: TrainAcc=0.9469, ValAcc=0.0000, ValLoss=4.3909
+    Epoch 19: TrainAcc=0.9512, ValAcc=0.0000, ValLoss=4.7158
+    Epoch 20: TrainAcc=0.9469, ValAcc=0.0000, ValLoss=4.6976
+    Epoch 21: TrainAcc=0.9469, ValAcc=0.0000, ValLoss=4.4395
+    Early stopping triggered.
+    New data recall: 0.2656
+
+  >>> Fold 5/5 <<<
+    Original train samples: 327
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4390, ValAcc=0.9667, ValLoss=1.0247
+    Epoch 02: TrainAcc=0.5285, ValAcc=1.0000, ValLoss=0.7655
+    Epoch 03: TrainAcc=0.6309, ValAcc=1.0000, ValLoss=0.4738
+    Epoch 04: TrainAcc=0.6813, ValAcc=1.0000, ValLoss=0.2750
+    Epoch 05: TrainAcc=0.6911, ValAcc=1.0000, ValLoss=0.1958
+    Epoch 06: TrainAcc=0.7984, ValAcc=1.0000, ValLoss=0.2134
+    Epoch 07: TrainAcc=0.8683, ValAcc=1.0000, ValLoss=0.2318
+    Epoch 08: TrainAcc=0.9008, ValAcc=1.0000, ValLoss=0.1705
+    Epoch 09: TrainAcc=0.9220, ValAcc=0.9000, ValLoss=0.2409
+    Epoch 10: TrainAcc=0.9301, ValAcc=0.9000, ValLoss=0.2548
+    Epoch 11: TrainAcc=0.9398, ValAcc=0.7000, ValLoss=0.5165
+    Epoch 12: TrainAcc=0.9463, ValAcc=0.6333, ValLoss=0.7643
+    Epoch 13: TrainAcc=0.9463, ValAcc=0.7333, ValLoss=0.4769
+    Epoch 14: TrainAcc=0.9431, ValAcc=0.6667, ValLoss=0.6597
+    Epoch 15: TrainAcc=0.9626, ValAcc=0.7667, ValLoss=0.5054
+    Epoch 16: TrainAcc=0.9561, ValAcc=0.6333, ValLoss=0.9811
+    Epoch 17: TrainAcc=0.9561, ValAcc=0.7000, ValLoss=0.7085
+    Epoch 18: TrainAcc=0.9707, ValAcc=0.7000, ValLoss=1.0384
+    Epoch 19: TrainAcc=0.9756, ValAcc=0.7667, ValLoss=0.5039
+    Epoch 20: TrainAcc=0.9675, ValAcc=0.7000, ValLoss=0.7965
+    Epoch 21: TrainAcc=0.9675, ValAcc=0.7667, ValLoss=0.5507
+    Epoch 22: TrainAcc=0.9691, ValAcc=0.5333, ValLoss=1.1994
+    Epoch 23: TrainAcc=0.9772, ValAcc=0.6333, ValLoss=1.4396
+    Epoch 24: TrainAcc=0.9724, ValAcc=0.7000, ValLoss=0.5473
+    Epoch 25: TrainAcc=0.9724, ValAcc=0.6667, ValLoss=0.8762
+    Epoch 26: TrainAcc=0.9789, ValAcc=0.6667, ValLoss=1.1749
+    Epoch 27: TrainAcc=0.9724, ValAcc=0.6333, ValLoss=1.5395
+    Epoch 28: TrainAcc=0.9772, ValAcc=0.7333, ValLoss=0.7158
+    Early stopping triggered.
+[I 2025-03-29 21:12:36,916] Trial 8 finished with value: 0.3401442110599987 and parameters: {'lr': 0.0001954276178019155, 'dropout_p': 0.2, 'weight_decay': 0.00014341637637891837, 'stat_dim': 128, 'comb_dim': 256, 'specaug_freq': 29, 'specaug_time': 29, 'specaug_f_masks': 1, 'specaug_t_masks': 2}. Best is trial 8 with value: 0.3401442110599987.
+    New data recall: 0.2426
+
+  === Results for Trial #8 ===
+  Avg Val Acc = 0.7727, Avg New Recall = 0.1548, Combined Score = 0.3401
+  ------------------------------------------------------------
+
+======================================================================
+Starting Optuna Trial #9 at Sat Mar 29 21:12:40 2025
+======================================================================
+Chosen hyperparams: lr=1.2e-03, dropout=0.30000000000000004, wd=4.9e-04, stat_dim=64, comb_dim=128, freq_mask=23, time_mask=32, freq_masks=1, time_masks=2
+
+  >>> Fold 1/5 <<<
+    Original train samples: 200
+    Train samples after SMOTE: 261
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.6169, ValAcc=0.0000, ValLoss=1.3215
+    Epoch 02: TrainAcc=0.8199, ValAcc=0.0955, ValLoss=1.3277
+    Epoch 03: TrainAcc=0.8314, ValAcc=0.0000, ValLoss=3.4515
+    Epoch 04: TrainAcc=0.8352, ValAcc=0.0000, ValLoss=4.7066
+    Epoch 05: TrainAcc=0.8697, ValAcc=0.0000, ValLoss=3.8994
+    Epoch 06: TrainAcc=0.9004, ValAcc=0.0000, ValLoss=4.2218
+    Epoch 07: TrainAcc=0.9234, ValAcc=0.0446, ValLoss=3.9544
+    Epoch 08: TrainAcc=0.9847, ValAcc=0.1019, ValLoss=4.0782
+    Epoch 09: TrainAcc=0.9962, ValAcc=0.1274, ValLoss=4.3352
+    Epoch 10: TrainAcc=0.9962, ValAcc=0.0764, ValLoss=5.5937
+    Epoch 11: TrainAcc=1.0000, ValAcc=0.0637, ValLoss=6.7197
+    Epoch 12: TrainAcc=1.0000, ValAcc=0.0573, ValLoss=7.5392
+    Epoch 13: TrainAcc=1.0000, ValAcc=0.0510, ValLoss=8.0579
+    Epoch 14: TrainAcc=1.0000, ValAcc=0.0510, ValLoss=8.3967
+    Epoch 15: TrainAcc=1.0000, ValAcc=0.0573, ValLoss=8.6642
+    Epoch 16: TrainAcc=1.0000, ValAcc=0.0510, ValLoss=8.8812
+    Epoch 17: TrainAcc=1.0000, ValAcc=0.0446, ValLoss=9.1453
+    Epoch 18: TrainAcc=0.9962, ValAcc=0.0446, ValLoss=9.2667
+    Epoch 19: TrainAcc=1.0000, ValAcc=0.0446, ValLoss=9.3448
+    Epoch 20: TrainAcc=1.0000, ValAcc=0.0446, ValLoss=9.3594
+    Epoch 21: TrainAcc=1.0000, ValAcc=0.0446, ValLoss=9.3313
+    Early stopping triggered.
+ FOld 1 : Val ACC 0.0000 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 2/5 <<<
+    Original train samples: 292
+    Train samples after SMOTE: 410
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.5463, ValAcc=0.1692, ValLoss=1.4084
+    Epoch 02: TrainAcc=0.7000, ValAcc=0.0154, ValLoss=2.0288
+    Epoch 03: TrainAcc=0.7390, ValAcc=0.0000, ValLoss=3.2289
+    Epoch 04: TrainAcc=0.8732, ValAcc=0.0000, ValLoss=4.3414
+    Epoch 05: TrainAcc=0.8732, ValAcc=0.0000, ValLoss=6.5374
+    Epoch 06: TrainAcc=0.9000, ValAcc=0.0000, ValLoss=9.0672
+    Epoch 07: TrainAcc=0.9098, ValAcc=0.0000, ValLoss=10.6762
+    Epoch 08: TrainAcc=0.9024, ValAcc=0.0000, ValLoss=11.6119
+    Epoch 09: TrainAcc=0.9146, ValAcc=0.0000, ValLoss=12.2925
+    Epoch 10: TrainAcc=0.9244, ValAcc=0.0000, ValLoss=13.5930
+    Epoch 11: TrainAcc=0.9439, ValAcc=0.0000, ValLoss=14.4560
+    Epoch 12: TrainAcc=0.9317, ValAcc=0.0000, ValLoss=15.9764
+    Epoch 13: TrainAcc=0.9366, ValAcc=0.0000, ValLoss=17.8576
+    Epoch 14: TrainAcc=0.9463, ValAcc=0.0000, ValLoss=18.0331
+    Epoch 15: TrainAcc=0.9439, ValAcc=0.0000, ValLoss=18.9747
+    Epoch 16: TrainAcc=0.9341, ValAcc=0.0000, ValLoss=19.6118
+    Epoch 17: TrainAcc=0.9683, ValAcc=0.0000, ValLoss=21.1805
+    Epoch 18: TrainAcc=0.9439, ValAcc=0.0000, ValLoss=23.2486
+    Epoch 19: TrainAcc=0.9585, ValAcc=0.0000, ValLoss=23.0120
+    Epoch 20: TrainAcc=0.9439, ValAcc=0.0000, ValLoss=23.2465
+    Epoch 21: TrainAcc=0.9585, ValAcc=0.0000, ValLoss=22.0860
+    Early stopping triggered.
+ FOld 2 : Val ACC 0.1692 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 3/5 <<<
+    Original train samples: 300
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4585, ValAcc=0.9649, ValLoss=0.8227
+    Epoch 02: TrainAcc=0.6520, ValAcc=1.0000, ValLoss=0.2732
+    Epoch 03: TrainAcc=0.8894, ValAcc=0.6316, ValLoss=0.6151
+    Epoch 04: TrainAcc=0.9431, ValAcc=0.4035, ValLoss=1.6893
+    Epoch 05: TrainAcc=0.9545, ValAcc=0.3509, ValLoss=2.3633
+    Epoch 06: TrainAcc=0.9626, ValAcc=0.2982, ValLoss=2.6558
+    Epoch 07: TrainAcc=0.9626, ValAcc=0.3860, ValLoss=2.0620
+    Epoch 08: TrainAcc=0.9642, ValAcc=0.3333, ValLoss=2.6174
+    Epoch 09: TrainAcc=0.9626, ValAcc=0.3333, ValLoss=2.9603
+    Epoch 10: TrainAcc=0.9675, ValAcc=0.2982, ValLoss=3.1418
+    Epoch 11: TrainAcc=0.9724, ValAcc=0.2807, ValLoss=3.7457
+    Epoch 12: TrainAcc=0.9724, ValAcc=0.2982, ValLoss=4.0218
+    Epoch 13: TrainAcc=0.9707, ValAcc=0.2982, ValLoss=4.3524
+    Epoch 14: TrainAcc=0.9691, ValAcc=0.2982, ValLoss=3.9722
+    Epoch 15: TrainAcc=0.9675, ValAcc=0.3509, ValLoss=2.6338
+    Epoch 16: TrainAcc=0.9724, ValAcc=0.3158, ValLoss=4.3855
+    Epoch 17: TrainAcc=0.9691, ValAcc=0.2982, ValLoss=4.8832
+    Epoch 18: TrainAcc=0.9724, ValAcc=0.3509, ValLoss=3.9120
+    Epoch 19: TrainAcc=0.9740, ValAcc=0.3158, ValLoss=4.6664
+    Epoch 20: TrainAcc=0.9756, ValAcc=0.2632, ValLoss=6.0086
+    Epoch 21: TrainAcc=0.9724, ValAcc=0.3158, ValLoss=5.9068
+    Epoch 22: TrainAcc=0.9740, ValAcc=0.3158, ValLoss=6.2707
+    Early stopping triggered.
+    New data recall: 0.2538
+
+  >>> Fold 4/5 <<<
+    Original train samples: 309
+    Train samples after SMOTE: 471
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4671, ValAcc=0.0000, ValLoss=1.3550
+    Epoch 02: TrainAcc=0.6369, ValAcc=0.0000, ValLoss=2.4473
+    Epoch 03: TrainAcc=0.7983, ValAcc=0.0000, ValLoss=3.2639
+    Epoch 04: TrainAcc=0.8747, ValAcc=0.0000, ValLoss=4.8877
+    Epoch 05: TrainAcc=0.8620, ValAcc=0.0000, ValLoss=5.0221
+    Epoch 06: TrainAcc=0.8960, ValAcc=0.0000, ValLoss=7.7852
+    Epoch 07: TrainAcc=0.9108, ValAcc=0.0000, ValLoss=6.6392
+    Epoch 08: TrainAcc=0.9342, ValAcc=0.0000, ValLoss=5.9919
+    Epoch 09: TrainAcc=0.9406, ValAcc=0.0000, ValLoss=5.4373
+    Epoch 10: TrainAcc=0.9448, ValAcc=0.0000, ValLoss=5.7879
+    Epoch 11: TrainAcc=0.9490, ValAcc=0.0000, ValLoss=5.6419
+    Epoch 12: TrainAcc=0.9257, ValAcc=0.0000, ValLoss=5.5261
+    Epoch 13: TrainAcc=0.9575, ValAcc=0.0000, ValLoss=5.4731
+    Epoch 14: TrainAcc=0.9512, ValAcc=0.0000, ValLoss=5.2497
+    Epoch 15: TrainAcc=0.9363, ValAcc=0.0000, ValLoss=5.1873
+    Epoch 16: TrainAcc=0.9512, ValAcc=0.0000, ValLoss=5.0924
+    Epoch 17: TrainAcc=0.9490, ValAcc=0.0000, ValLoss=5.1555
+    Epoch 18: TrainAcc=0.9618, ValAcc=0.0000, ValLoss=4.6071
+    Epoch 19: TrainAcc=0.9533, ValAcc=0.0000, ValLoss=3.8163
+    Epoch 20: TrainAcc=0.9512, ValAcc=0.0000, ValLoss=4.5923
+    Epoch 21: TrainAcc=0.9554, ValAcc=0.0000, ValLoss=5.9222
+    Early stopping triggered.
+ FOld 4 : Val ACC 0.0000 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 5/5 <<<
+    Original train samples: 327
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4504, ValAcc=0.5667, ValLoss=0.9463
+    Epoch 02: TrainAcc=0.6423, ValAcc=1.0000, ValLoss=0.1749
+    Epoch 03: TrainAcc=0.8098, ValAcc=1.0000, ValLoss=0.0287
+    Epoch 04: TrainAcc=0.8927, ValAcc=1.0000, ValLoss=0.0928
+    Epoch 05: TrainAcc=0.9138, ValAcc=1.0000, ValLoss=0.0769
+    Epoch 06: TrainAcc=0.9317, ValAcc=0.9333, ValLoss=0.1708
+    Epoch 07: TrainAcc=0.9350, ValAcc=0.9333, ValLoss=0.2360
+    Epoch 08: TrainAcc=0.9236, ValAcc=0.8333, ValLoss=0.2638
+    Epoch 09: TrainAcc=0.9447, ValAcc=0.9000, ValLoss=0.1904
+    Epoch 10: TrainAcc=0.9366, ValAcc=0.7000, ValLoss=0.4770
+    Epoch 11: TrainAcc=0.9512, ValAcc=0.9000, ValLoss=0.2222
+    Epoch 12: TrainAcc=0.9463, ValAcc=0.6000, ValLoss=1.2034
+    Epoch 13: TrainAcc=0.9512, ValAcc=0.7333, ValLoss=0.4497
+    Epoch 14: TrainAcc=0.9561, ValAcc=0.5667, ValLoss=1.4509
+    Epoch 15: TrainAcc=0.9675, ValAcc=0.6333, ValLoss=0.8741
+    Epoch 16: TrainAcc=0.9610, ValAcc=0.5667, ValLoss=2.8340
+    Epoch 17: TrainAcc=0.9837, ValAcc=0.6000, ValLoss=3.0105
+    Epoch 18: TrainAcc=0.9659, ValAcc=0.1667, ValLoss=6.1474
+    Epoch 19: TrainAcc=0.9528, ValAcc=0.7333, ValLoss=0.3408
+    Epoch 20: TrainAcc=0.9610, ValAcc=0.5667, ValLoss=0.6101
+    Epoch 21: TrainAcc=0.9626, ValAcc=0.6333, ValLoss=0.7468
+    Epoch 22: TrainAcc=0.9724, ValAcc=0.6000, ValLoss=0.7579
+    Epoch 23: TrainAcc=0.9626, ValAcc=0.6333, ValLoss=0.9579
+    Early stopping triggered.
+[I 2025-03-29 21:18:29,197] Trial 9 pruned. 
+    New data recall: 0.2415
+
+  === Results for Trial #9 ===
+  Avg Val Acc = 0.4338, Avg New Recall = 0.0991, Combined Score = 0.1995
+  ------------------------------------------------------------
+  Trial pruned by Optuna.
+
+======================================================================
+Starting Optuna Trial #10 at Sat Mar 29 21:18:32 2025
+======================================================================
+Chosen hyperparams: lr=1.9e-04, dropout=0.5, wd=1.8e-04, stat_dim=128, comb_dim=64, freq_mask=28, time_mask=40, freq_masks=1, time_masks=2
+
+  >>> Fold 1/5 <<<
+    Original train samples: 200
+    Train samples after SMOTE: 261
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4215, ValAcc=0.9682, ValLoss=1.0237
+    Epoch 02: TrainAcc=0.4828, ValAcc=0.9745, ValLoss=1.0316
+    Epoch 03: TrainAcc=0.5939, ValAcc=0.7070, ValLoss=1.0660
+    Epoch 04: TrainAcc=0.7701, ValAcc=0.1720, ValLoss=1.1355
+    Epoch 05: TrainAcc=0.7931, ValAcc=0.0892, ValLoss=1.2219
+    Epoch 06: TrainAcc=0.8314, ValAcc=0.1083, ValLoss=1.2765
+    Epoch 07: TrainAcc=0.8314, ValAcc=0.2166, ValLoss=1.2864
+    Epoch 08: TrainAcc=0.8352, ValAcc=0.2229, ValLoss=1.2856
+    Epoch 09: TrainAcc=0.8314, ValAcc=0.2293, ValLoss=1.3419
+    Epoch 10: TrainAcc=0.8391, ValAcc=0.1338, ValLoss=1.5752
+    Epoch 11: TrainAcc=0.8352, ValAcc=0.0510, ValLoss=1.9313
+    Epoch 12: TrainAcc=0.8391, ValAcc=0.0318, ValLoss=2.2677
+    Epoch 13: TrainAcc=0.8352, ValAcc=0.0255, ValLoss=2.3221
+    Epoch 14: TrainAcc=0.8314, ValAcc=0.0510, ValLoss=2.1309
+    Epoch 15: TrainAcc=0.8352, ValAcc=0.0510, ValLoss=2.0613
+    Epoch 16: TrainAcc=0.8352, ValAcc=0.0637, ValLoss=1.8792
+    Epoch 17: TrainAcc=0.8429, ValAcc=0.0446, ValLoss=2.0298
+    Epoch 18: TrainAcc=0.8659, ValAcc=0.0255, ValLoss=2.3190
+    Epoch 19: TrainAcc=0.8621, ValAcc=0.0255, ValLoss=2.4916
+    Epoch 20: TrainAcc=0.8659, ValAcc=0.0191, ValLoss=2.7097
+    Epoch 21: TrainAcc=0.8736, ValAcc=0.0127, ValLoss=2.8159
+    Early stopping triggered.
+    New data recall: 0.2590
+
+  >>> Fold 2/5 <<<
+    Original train samples: 292
+    Train samples after SMOTE: 410
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4756, ValAcc=0.0615, ValLoss=1.1217
+    Epoch 02: TrainAcc=0.5366, ValAcc=0.0000, ValLoss=1.8826
+    Epoch 03: TrainAcc=0.5561, ValAcc=0.0000, ValLoss=2.9125
+    Epoch 04: TrainAcc=0.5512, ValAcc=0.0000, ValLoss=3.4626
+    Epoch 05: TrainAcc=0.5390, ValAcc=0.0000, ValLoss=4.0164
+    Epoch 06: TrainAcc=0.5561, ValAcc=0.0000, ValLoss=4.2484
+    Epoch 07: TrainAcc=0.6195, ValAcc=0.0000, ValLoss=4.6070
+    Epoch 08: TrainAcc=0.6951, ValAcc=0.0000, ValLoss=4.4582
+    Epoch 09: TrainAcc=0.7390, ValAcc=0.0000, ValLoss=4.4645
+    Epoch 10: TrainAcc=0.7488, ValAcc=0.0000, ValLoss=4.5736
+    Epoch 11: TrainAcc=0.7902, ValAcc=0.0000, ValLoss=4.2441
+    Epoch 12: TrainAcc=0.8390, ValAcc=0.0000, ValLoss=3.9248
+    Epoch 13: TrainAcc=0.8488, ValAcc=0.0000, ValLoss=3.7842
+    Epoch 14: TrainAcc=0.8561, ValAcc=0.0000, ValLoss=3.6123
+    Epoch 15: TrainAcc=0.8537, ValAcc=0.0000, ValLoss=3.5760
+    Epoch 16: TrainAcc=0.8756, ValAcc=0.0000, ValLoss=3.5842
+    Epoch 17: TrainAcc=0.8805, ValAcc=0.0000, ValLoss=3.8580
+    Epoch 18: TrainAcc=0.8854, ValAcc=0.0000, ValLoss=4.2661
+    Epoch 19: TrainAcc=0.8927, ValAcc=0.0000, ValLoss=4.6463
+    Epoch 20: TrainAcc=0.8878, ValAcc=0.0000, ValLoss=4.9583
+    Epoch 21: TrainAcc=0.8927, ValAcc=0.0000, ValLoss=5.2038
+    Early stopping triggered.
+ FOld 2 : Val ACC 0.0615 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 3/5 <<<
+    Original train samples: 300
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3659, ValAcc=0.3684, ValLoss=1.0952
+    Epoch 02: TrainAcc=0.4667, ValAcc=0.2807, ValLoss=1.0290
+    Epoch 03: TrainAcc=0.5187, ValAcc=0.5439, ValLoss=0.9036
+    Epoch 04: TrainAcc=0.5724, ValAcc=0.8947, ValLoss=0.7757
+    Epoch 05: TrainAcc=0.6130, ValAcc=1.0000, ValLoss=0.6097
+    Epoch 06: TrainAcc=0.6569, ValAcc=1.0000, ValLoss=0.4880
+    Epoch 07: TrainAcc=0.6813, ValAcc=1.0000, ValLoss=0.3906
+    Epoch 08: TrainAcc=0.7301, ValAcc=1.0000, ValLoss=0.3337
+    Epoch 09: TrainAcc=0.7805, ValAcc=0.9474, ValLoss=0.3281
+    Epoch 10: TrainAcc=0.8439, ValAcc=0.7895, ValLoss=0.4158
+    Epoch 11: TrainAcc=0.8846, ValAcc=0.6842, ValLoss=0.5634
+    Epoch 12: TrainAcc=0.9073, ValAcc=0.6491, ValLoss=0.6603
+    Epoch 13: TrainAcc=0.9220, ValAcc=0.6140, ValLoss=0.8254
+    Epoch 14: TrainAcc=0.9350, ValAcc=0.4912, ValLoss=1.0409
+    Epoch 15: TrainAcc=0.9496, ValAcc=0.3860, ValLoss=1.3283
+    Epoch 16: TrainAcc=0.9463, ValAcc=0.3684, ValLoss=1.6696
+    Epoch 17: TrainAcc=0.9577, ValAcc=0.3684, ValLoss=1.9040
+    Epoch 18: TrainAcc=0.9642, ValAcc=0.3509, ValLoss=2.1246
+    Epoch 19: TrainAcc=0.9593, ValAcc=0.3333, ValLoss=2.2941
+    Epoch 20: TrainAcc=0.9642, ValAcc=0.2982, ValLoss=2.4671
+    Epoch 21: TrainAcc=0.9691, ValAcc=0.2982, ValLoss=2.5889
+    Epoch 22: TrainAcc=0.9642, ValAcc=0.2982, ValLoss=2.8426
+    Epoch 23: TrainAcc=0.9642, ValAcc=0.2982, ValLoss=2.8933
+    Epoch 24: TrainAcc=0.9691, ValAcc=0.2982, ValLoss=3.1927
+    Epoch 25: TrainAcc=0.9691, ValAcc=0.2807, ValLoss=3.4599
+    Epoch 26: TrainAcc=0.9691, ValAcc=0.2807, ValLoss=3.6165
+    Epoch 27: TrainAcc=0.9675, ValAcc=0.2807, ValLoss=3.7062
+    Epoch 28: TrainAcc=0.9707, ValAcc=0.2807, ValLoss=3.7981
+    Epoch 29: TrainAcc=0.9675, ValAcc=0.2982, ValLoss=3.4257
+    Early stopping triggered.
+    New data recall: 0.2399
+
+  >>> Fold 4/5 <<<
+    Original train samples: 309
+    Train samples after SMOTE: 471
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4395, ValAcc=0.0208, ValLoss=1.0616
+    Epoch 02: TrainAcc=0.5096, ValAcc=0.0208, ValLoss=1.1221
+    Epoch 03: TrainAcc=0.5350, ValAcc=0.0000, ValLoss=1.3968
+    Epoch 04: TrainAcc=0.5435, ValAcc=0.0000, ValLoss=1.6894
+    Epoch 05: TrainAcc=0.6030, ValAcc=0.0000, ValLoss=1.9715
+    Epoch 06: TrainAcc=0.6476, ValAcc=0.0000, ValLoss=1.9557
+    Epoch 07: TrainAcc=0.7028, ValAcc=0.0000, ValLoss=2.2089
+    Epoch 08: TrainAcc=0.7452, ValAcc=0.0000, ValLoss=2.3930
+    Epoch 09: TrainAcc=0.7240, ValAcc=0.0000, ValLoss=2.5548
+    Epoch 10: TrainAcc=0.7431, ValAcc=0.0000, ValLoss=2.4658
+    Epoch 11: TrainAcc=0.7877, ValAcc=0.0000, ValLoss=2.5569
+    Epoch 12: TrainAcc=0.8217, ValAcc=0.0000, ValLoss=2.6309
+    Epoch 13: TrainAcc=0.8429, ValAcc=0.0000, ValLoss=2.7159
+    Epoch 14: TrainAcc=0.8429, ValAcc=0.0000, ValLoss=2.6725
+    Epoch 15: TrainAcc=0.8747, ValAcc=0.0000, ValLoss=2.6351
+    Epoch 16: TrainAcc=0.8684, ValAcc=0.0000, ValLoss=2.7338
+    Epoch 17: TrainAcc=0.8790, ValAcc=0.0000, ValLoss=3.0332
+    Epoch 18: TrainAcc=0.8811, ValAcc=0.0000, ValLoss=3.2225
+    Epoch 19: TrainAcc=0.8705, ValAcc=0.0000, ValLoss=3.3628
+    Epoch 20: TrainAcc=0.9066, ValAcc=0.0000, ValLoss=3.2946
+    Epoch 21: TrainAcc=0.8981, ValAcc=0.0000, ValLoss=3.3090
+    Early stopping triggered.
+ FOld 4 : Val ACC 0.0208 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 5/5 <<<
+    Original train samples: 327
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.3854, ValAcc=0.0000, ValLoss=1.1541
+    Epoch 02: TrainAcc=0.4602, ValAcc=0.0000, ValLoss=1.0726
+    Epoch 03: TrainAcc=0.5089, ValAcc=0.8000, ValLoss=0.8876
+    Epoch 04: TrainAcc=0.5415, ValAcc=1.0000, ValLoss=0.6462
+    Epoch 05: TrainAcc=0.5919, ValAcc=1.0000, ValLoss=0.4144
+    Epoch 06: TrainAcc=0.6228, ValAcc=1.0000, ValLoss=0.3918
+    Epoch 07: TrainAcc=0.6634, ValAcc=1.0000, ValLoss=0.2693
+    Epoch 08: TrainAcc=0.6780, ValAcc=1.0000, ValLoss=0.1947
+    Epoch 09: TrainAcc=0.7089, ValAcc=1.0000, ValLoss=0.1658
+    Epoch 10: TrainAcc=0.7545, ValAcc=1.0000, ValLoss=0.1037
+    Epoch 11: TrainAcc=0.8033, ValAcc=1.0000, ValLoss=0.1052
+    Epoch 12: TrainAcc=0.8325, ValAcc=1.0000, ValLoss=0.1093
+    Epoch 13: TrainAcc=0.8585, ValAcc=1.0000, ValLoss=0.1051
+    Epoch 14: TrainAcc=0.8764, ValAcc=1.0000, ValLoss=0.1333
+    Epoch 15: TrainAcc=0.8797, ValAcc=1.0000, ValLoss=0.0964
+    Epoch 16: TrainAcc=0.8943, ValAcc=1.0000, ValLoss=0.1615
+    Epoch 17: TrainAcc=0.9154, ValAcc=0.8667, ValLoss=0.2601
+    Epoch 18: TrainAcc=0.9106, ValAcc=0.9000, ValLoss=0.2245
+    Epoch 19: TrainAcc=0.9089, ValAcc=0.9000, ValLoss=0.2119
+    Epoch 20: TrainAcc=0.9203, ValAcc=0.9000, ValLoss=0.1815
+    Epoch 21: TrainAcc=0.9203, ValAcc=0.6667, ValLoss=0.4452
+    Epoch 22: TrainAcc=0.9447, ValAcc=0.7667, ValLoss=0.3433
+    Epoch 23: TrainAcc=0.9268, ValAcc=0.8333, ValLoss=0.2739
+    Epoch 24: TrainAcc=0.9366, ValAcc=0.8667, ValLoss=0.2195
+    Epoch 25: TrainAcc=0.9512, ValAcc=0.7667, ValLoss=0.3748
+    Epoch 26: TrainAcc=0.9431, ValAcc=0.8333, ValLoss=0.3196
+    Epoch 27: TrainAcc=0.9577, ValAcc=0.6333, ValLoss=0.5265
+    Epoch 28: TrainAcc=0.9512, ValAcc=0.6333, ValLoss=0.5312
+    Epoch 29: TrainAcc=0.9545, ValAcc=0.7333, ValLoss=0.4961
+    Epoch 30: TrainAcc=0.9447, ValAcc=0.6667, ValLoss=0.6174
+    Epoch 31: TrainAcc=0.9577, ValAcc=0.7000, ValLoss=0.5437
+    Epoch 32: TrainAcc=0.9561, ValAcc=0.7000, ValLoss=0.4751
+    Epoch 33: TrainAcc=0.9626, ValAcc=0.8000, ValLoss=0.3245
+    Epoch 34: TrainAcc=0.9642, ValAcc=0.7333, ValLoss=0.5463
+    Epoch 35: TrainAcc=0.9642, ValAcc=0.8333, ValLoss=0.2544
+    Early stopping triggered.
+[I 2025-03-29 21:25:30,932] Trial 10 pruned. 
+    New data recall: 0.2582
+
+  === Results for Trial #10 ===
+  Avg Val Acc = 0.5996, Avg New Recall = 0.1514, Combined Score = 0.2859
+  ------------------------------------------------------------
+  Trial pruned by Optuna.
+
+======================================================================
+Starting Optuna Trial #11 at Sat Mar 29 21:25:34 2025
+======================================================================
+Chosen hyperparams: lr=4.4e-04, dropout=0.30000000000000004, wd=4.7e-05, stat_dim=128, comb_dim=256, freq_mask=10, time_mask=33, freq_masks=1, time_masks=1
+
+  >>> Fold 1/5 <<<
+    Original train samples: 200
+    Train samples after SMOTE: 261
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.5747, ValAcc=0.0382, ValLoss=1.0749
+    Epoch 02: TrainAcc=0.8352, ValAcc=0.0064, ValLoss=1.2235
+    Epoch 03: TrainAcc=0.8429, ValAcc=0.0446, ValLoss=1.2895
+    Epoch 04: TrainAcc=0.8467, ValAcc=0.0637, ValLoss=1.5245
+    Epoch 05: TrainAcc=0.8314, ValAcc=0.0064, ValLoss=1.9999
+    Epoch 06: TrainAcc=0.8314, ValAcc=0.0000, ValLoss=2.3870
+    Epoch 07: TrainAcc=0.9195, ValAcc=0.0000, ValLoss=2.8358
+    Epoch 08: TrainAcc=0.9425, ValAcc=0.0000, ValLoss=3.3754
+    Epoch 09: TrainAcc=0.9387, ValAcc=0.0000, ValLoss=4.2323
+    Epoch 10: TrainAcc=0.9693, ValAcc=0.0000, ValLoss=5.3140
+    Epoch 11: TrainAcc=0.9962, ValAcc=0.0000, ValLoss=5.9174
+    Epoch 12: TrainAcc=0.9885, ValAcc=0.0382, ValLoss=5.9652
+    Epoch 13: TrainAcc=0.9962, ValAcc=0.0446, ValLoss=6.1738
+    Epoch 14: TrainAcc=0.9962, ValAcc=0.0382, ValLoss=6.3677
+    Epoch 15: TrainAcc=1.0000, ValAcc=0.0382, ValLoss=6.5807
+    Epoch 16: TrainAcc=0.9962, ValAcc=0.0382, ValLoss=6.6386
+    Epoch 17: TrainAcc=1.0000, ValAcc=0.0318, ValLoss=6.8633
+    Epoch 18: TrainAcc=1.0000, ValAcc=0.0382, ValLoss=6.9563
+    Epoch 19: TrainAcc=1.0000, ValAcc=0.0318, ValLoss=7.2143
+    Epoch 20: TrainAcc=1.0000, ValAcc=0.0318, ValLoss=7.2512
+    Epoch 21: TrainAcc=1.0000, ValAcc=0.0255, ValLoss=7.3387
+    Early stopping triggered.
+ FOld 1 : Val ACC 0.0382 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 2/5 <<<
+    Original train samples: 292
+    Train samples after SMOTE: 410
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4537, ValAcc=0.1077, ValLoss=1.1562
+    Epoch 02: TrainAcc=0.5415, ValAcc=0.0000, ValLoss=1.5158
+    Epoch 03: TrainAcc=0.7488, ValAcc=0.0000, ValLoss=4.8865
+    Epoch 04: TrainAcc=0.8415, ValAcc=0.0000, ValLoss=5.4741
+    Epoch 05: TrainAcc=0.8683, ValAcc=0.0000, ValLoss=6.4818
+    Epoch 06: TrainAcc=0.9000, ValAcc=0.0000, ValLoss=7.5933
+    Epoch 07: TrainAcc=0.9073, ValAcc=0.0000, ValLoss=8.9163
+    Epoch 08: TrainAcc=0.9195, ValAcc=0.0000, ValLoss=10.8858
+    Epoch 09: TrainAcc=0.9390, ValAcc=0.0000, ValLoss=11.3702
+    Epoch 10: TrainAcc=0.9415, ValAcc=0.0000, ValLoss=12.4182
+    Epoch 11: TrainAcc=0.9415, ValAcc=0.0000, ValLoss=12.7229
+    Epoch 12: TrainAcc=0.9463, ValAcc=0.0000, ValLoss=13.1618
+    Epoch 13: TrainAcc=0.9512, ValAcc=0.0000, ValLoss=13.3318
+    Epoch 14: TrainAcc=0.9512, ValAcc=0.0000, ValLoss=14.4593
+    Epoch 15: TrainAcc=0.9634, ValAcc=0.0000, ValLoss=15.0698
+    Epoch 16: TrainAcc=0.9585, ValAcc=0.0000, ValLoss=15.6061
+    Epoch 17: TrainAcc=0.9561, ValAcc=0.0000, ValLoss=14.6592
+    Epoch 18: TrainAcc=0.9610, ValAcc=0.0000, ValLoss=14.4592
+    Epoch 19: TrainAcc=0.9512, ValAcc=0.0000, ValLoss=15.8416
+    Epoch 20: TrainAcc=0.9585, ValAcc=0.0000, ValLoss=16.4731
+    Epoch 21: TrainAcc=0.9634, ValAcc=0.0000, ValLoss=16.5501
+    Early stopping triggered.
+ FOld 2 : Val ACC 0.1077 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 3/5 <<<
+    Original train samples: 300
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4520, ValAcc=0.0000, ValLoss=1.2268
+    Epoch 02: TrainAcc=0.6748, ValAcc=0.9649, ValLoss=0.6302
+    Epoch 03: TrainAcc=0.7626, ValAcc=0.7719, ValLoss=0.5281
+    Epoch 04: TrainAcc=0.9236, ValAcc=0.4386, ValLoss=1.0299
+    Epoch 05: TrainAcc=0.9561, ValAcc=0.2982, ValLoss=2.1019
+    Epoch 06: TrainAcc=0.9691, ValAcc=0.2807, ValLoss=3.1085
+    Epoch 07: TrainAcc=0.9756, ValAcc=0.2982, ValLoss=3.2747
+    Epoch 08: TrainAcc=0.9691, ValAcc=0.2807, ValLoss=3.9425
+    Epoch 09: TrainAcc=0.9772, ValAcc=0.2807, ValLoss=3.9942
+    Epoch 10: TrainAcc=0.9740, ValAcc=0.2807, ValLoss=4.5119
+    Epoch 11: TrainAcc=0.9675, ValAcc=0.2982, ValLoss=3.8769
+    Epoch 12: TrainAcc=0.9707, ValAcc=0.2982, ValLoss=3.9329
+    Epoch 13: TrainAcc=0.9740, ValAcc=0.2982, ValLoss=4.0635
+    Epoch 14: TrainAcc=0.9756, ValAcc=0.2807, ValLoss=5.0457
+    Epoch 15: TrainAcc=0.9772, ValAcc=0.2982, ValLoss=4.5185
+    Epoch 16: TrainAcc=0.9772, ValAcc=0.2982, ValLoss=4.8386
+    Epoch 17: TrainAcc=0.9821, ValAcc=0.2982, ValLoss=5.4946
+    Epoch 18: TrainAcc=0.9821, ValAcc=0.2807, ValLoss=5.4990
+    Epoch 19: TrainAcc=0.9821, ValAcc=0.2807, ValLoss=6.1121
+    Epoch 20: TrainAcc=0.9724, ValAcc=0.2807, ValLoss=5.5695
+    Epoch 21: TrainAcc=0.9724, ValAcc=0.2807, ValLoss=7.6106
+    Epoch 22: TrainAcc=0.9821, ValAcc=0.2982, ValLoss=5.6419
+    Epoch 23: TrainAcc=0.9756, ValAcc=0.2807, ValLoss=6.3104
+    Early stopping triggered.
+ FOld 3 : Val ACC 0.7719 is below threshold 0.80. Skipping new data evaluation.
+
+  >>> Fold 4/5 <<<
+    Original train samples: 309
+    Train samples after SMOTE: 471
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4713, ValAcc=0.8958, ValLoss=1.0345
+    Epoch 02: TrainAcc=0.6008, ValAcc=0.0208, ValLoss=1.4727
+    Epoch 03: TrainAcc=0.7134, ValAcc=0.0000, ValLoss=2.4562
+    Epoch 04: TrainAcc=0.8556, ValAcc=0.0000, ValLoss=3.0281
+    Epoch 05: TrainAcc=0.8896, ValAcc=0.0000, ValLoss=3.4047
+    Epoch 06: TrainAcc=0.9023, ValAcc=0.0000, ValLoss=3.9690
+    Epoch 07: TrainAcc=0.9299, ValAcc=0.0000, ValLoss=4.9499
+    Epoch 08: TrainAcc=0.9406, ValAcc=0.0000, ValLoss=4.6547
+    Epoch 09: TrainAcc=0.9448, ValAcc=0.0208, ValLoss=3.3336
+    Epoch 10: TrainAcc=0.9448, ValAcc=0.0000, ValLoss=3.6573
+    Epoch 11: TrainAcc=0.9724, ValAcc=0.0000, ValLoss=4.2749
+    Epoch 12: TrainAcc=0.9618, ValAcc=0.0000, ValLoss=4.7241
+    Epoch 13: TrainAcc=0.9766, ValAcc=0.0000, ValLoss=4.6800
+    Epoch 14: TrainAcc=0.9639, ValAcc=0.0000, ValLoss=4.7800
+    Epoch 15: TrainAcc=0.9724, ValAcc=0.0000, ValLoss=4.2172
+    Epoch 16: TrainAcc=0.9639, ValAcc=0.0000, ValLoss=4.5197
+    Epoch 17: TrainAcc=0.9745, ValAcc=0.0000, ValLoss=4.9745
+    Epoch 18: TrainAcc=0.9724, ValAcc=0.0000, ValLoss=4.9694
+    Epoch 19: TrainAcc=0.9830, ValAcc=0.0000, ValLoss=4.7818
+    Epoch 20: TrainAcc=0.9788, ValAcc=0.0000, ValLoss=5.2797
+    Epoch 21: TrainAcc=0.9873, ValAcc=0.0000, ValLoss=5.8068
+    Early stopping triggered.
+    New data recall: 0.2505
+
+  >>> Fold 5/5 <<<
+    Original train samples: 327
+    Train samples after SMOTE: 615
+[DEBUG] Determined CNN output features: 1280
+    Epoch 01: TrainAcc=0.4618, ValAcc=0.5000, ValLoss=1.0469
+    Epoch 02: TrainAcc=0.6244, ValAcc=1.0000, ValLoss=0.4286
+    Epoch 03: TrainAcc=0.7333, ValAcc=1.0000, ValLoss=0.1999
+    Epoch 04: TrainAcc=0.8634, ValAcc=1.0000, ValLoss=0.1450
+    Epoch 05: TrainAcc=0.9089, ValAcc=0.9667, ValLoss=0.1994
+    Epoch 06: TrainAcc=0.9333, ValAcc=0.8667, ValLoss=0.2507
+    Epoch 07: TrainAcc=0.9447, ValAcc=0.6333, ValLoss=0.6844
+    Epoch 08: TrainAcc=0.9610, ValAcc=0.8333, ValLoss=0.2161
+    Epoch 09: TrainAcc=0.9626, ValAcc=0.6667, ValLoss=0.6070
+    Epoch 10: TrainAcc=0.9675, ValAcc=0.7000, ValLoss=0.4621
+    Epoch 11: TrainAcc=0.9593, ValAcc=0.6667, ValLoss=0.7861
+    Epoch 12: TrainAcc=0.9756, ValAcc=0.7000, ValLoss=0.6424
+    Epoch 13: TrainAcc=0.9772, ValAcc=0.7000, ValLoss=0.6540
+    Epoch 14: TrainAcc=0.9789, ValAcc=0.6333, ValLoss=0.8840
+    Epoch 15: TrainAcc=0.9854, ValAcc=0.6333, ValLoss=1.1196
+    Epoch 16: TrainAcc=0.9724, ValAcc=0.6333, ValLoss=1.3152
+    Epoch 17: TrainAcc=0.9870, ValAcc=0.6667, ValLoss=1.0209
+    Epoch 18: TrainAcc=0.9772, ValAcc=0.6000, ValLoss=1.3154
+    Epoch 19: TrainAcc=0.9886, ValAcc=0.6667, ValLoss=0.8786
+    Epoch 20: TrainAcc=0.9854, ValAcc=0.6667, ValLoss=1.3274
+    Epoch 21: TrainAcc=0.9854, ValAcc=0.6667, ValLoss=1.4188
+    Epoch 22: TrainAcc=0.9821, ValAcc=0.6667, ValLoss=1.0983
+    Epoch 23: TrainAcc=0.9854, ValAcc=0.6000, ValLoss=1.4905
+    Epoch 24: TrainAcc=0.9821, ValAcc=0.9333, ValLoss=0.1046
+    Epoch 25: TrainAcc=0.9772, ValAcc=0.5667, ValLoss=2.2337
+    Epoch 26: TrainAcc=0.9870, ValAcc=0.7000, ValLoss=1.1582
+    Epoch 27: TrainAcc=0.9789, ValAcc=0.6333, ValLoss=1.9488
+    Epoch 28: TrainAcc=0.9886, ValAcc=0.6333, ValLoss=1.5869
+    Epoch 29: TrainAcc=0.9854, ValAcc=0.6667, ValLoss=1.5329
+    Epoch 30: TrainAcc=0.9902, ValAcc=0.6333, ValLoss=2.3408
+    Epoch 31: TrainAcc=0.9870, ValAcc=0.6333, ValLoss=2.0341
+    Epoch 32: TrainAcc=0.9854, ValAcc=0.6333, ValLoss=1.8506
+    Epoch 33: TrainAcc=0.9935, ValAcc=0.6333, ValLoss=1.9329
+    Epoch 34: TrainAcc=0.9919, ValAcc=0.6333, ValLoss=2.4235
+    Epoch 35: TrainAcc=0.9951, ValAcc=0.6000, ValLoss=2.6846
+    Epoch 36: TrainAcc=0.9902, ValAcc=0.6000, ValLoss=2.2723
+    Epoch 37: TrainAcc=0.9854, ValAcc=0.6000, ValLoss=2.2883
+    Epoch 38: TrainAcc=0.9951, ValAcc=0.6667, ValLoss=1.2536
+    Epoch 39: TrainAcc=0.9951, ValAcc=0.6667, ValLoss=0.8362
+    Epoch 40: TrainAcc=0.9919, ValAcc=0.6333, ValLoss=1.2954
+    Epoch 41: TrainAcc=0.9870, ValAcc=0.6333, ValLoss=2.3145
+    Epoch 42: TrainAcc=0.9902, ValAcc=0.6000, ValLoss=1.7958
+    Epoch 43: TrainAcc=0.9886, ValAcc=0.5667, ValLoss=1.7591
+    Epoch 44: TrainAcc=0.9935, ValAcc=0.6000, ValLoss=1.9066
+    Early stopping triggered.
+[I 2025-03-29 21:32:29,665] Trial 11 pruned. 
+    New data recall: 0.2386
+
+  === Results for Trial #11 ===
+  Avg Val Acc = 0.5494, Avg New Recall = 0.0978, Combined Score = 0.2333
+  ------------------------------------------------------------
+  Trial pruned by Optuna.
+
+=== Optimization finished. ===
+Number of finished trials: 12
+Best trial found: #8 with value (score) = 0.3401
+
+Saving top 5 models by new_recall...
+  Saved model for fold 3 to: ./saved_models_hybrid/best_model_trial8_fold3_recall0.2656.pth
