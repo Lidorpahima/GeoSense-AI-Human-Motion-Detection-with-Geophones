@@ -8,7 +8,7 @@ from torchvision import transforms
 from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
 from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, recall_score, confusion_matrix, classification_report
+from sklearn.metrics import accuracy_score, recall_score, confusion_matrix, classification_report, f1_score, roc_auc_score
 from scipy.signal import butter, filtfilt, spectrogram
 import librosa
 import matplotlib.pyplot as plt
@@ -23,6 +23,7 @@ import random
 from copy import deepcopy
 import warnings
 import torch.nn.functional as F
+from sklearn.impute import SimpleImputer
 
 warnings.filterwarnings("ignore")
 
@@ -41,7 +42,7 @@ NUM_CLASSES    = 3
 
 # פרמטרים לעיבוד אות
 window_size    = 2000  # ב-milliseconds
-stride         = 500
+stride         = 250
 fs             = 1000.0
 max_channels   = 37
 
@@ -61,12 +62,12 @@ order          = 4
 
 # היפר-פרמטרים לאימון ו-K-Fold
 N_SPLITS       = 5
-EPOCHS         = 30
-PATIENCE       = 8
+EPOCHS         = 50
+PATIENCE       = 10
 BATCH_SIZE     = 32
 
 # Optuna
-TIMEOUT_SECONDS = 900   # לדוגמה 15 דקות
+TIMEOUT_SECONDS = 7*3600   # לדוגמה 7 שעות
 TOP_N_MODELS   = 5
 
 # סף ל-Recall בדאטה החדש
@@ -187,7 +188,9 @@ def load_data_hybrid_by_file(file_map, target_img_size=(IMG_HEIGHT, IMG_WIDTH)):
             try:
                 df = pd.read_csv(filepath, header=None)
                 df = df.dropna()
-                data = df.values
+                # Impute missing values with the mean
+                imputer = SimpleImputer(strategy='mean')
+                data = imputer.fit_transform(df)
                 data = pad_channels(data, max_channels)
                 if data.shape[0] < window_size:
                     continue
@@ -217,7 +220,7 @@ def load_data_hybrid_by_file(file_map, target_img_size=(IMG_HEIGHT, IMG_WIDTH)):
     return np.array(all_specs, dtype=np.float32), np.array(all_stat_features, dtype=np.float32), np.array(all_labels, dtype=np.int64), np.array(all_groups, dtype=np.int64)
 
 # =====================================================================================
-# =                          טעינת הדאטהסט הראשי והדאטה החדש                          =
+# =                         טעינת הדאטהסט הראשי והדאטה החדש                          =
 # =====================================================================================
 print("\n=== Loading Original Dataset ===")
 orig_specs, orig_stat_feats, orig_labels, orig_groups = load_data_hybrid_by_file(ORIGINAL_DATA_PATHS)
@@ -234,7 +237,7 @@ else:
     new_specs, new_stat_feats, new_labels = np.array([]), np.array([]), np.array([])
 
 # =====================================================================================
-# =                         הגדרת SpecAugment ו-HybridDataset                          =
+# =                      הגדרת SpecAugment ו-HybridDataset                          =
 # =====================================================================================
 class SpecAugment(nn.Module):
     def __init__(self, freq_mask_param=10, time_mask_param=20, num_freq_masks=1, num_time_masks=1):
@@ -243,7 +246,7 @@ class SpecAugment(nn.Module):
         self.time_mask_param = time_mask_param
         self.num_freq_masks = num_freq_masks
         self.num_time_masks = num_time_masks
-    
+
     def forward(self, spec):
         if not isinstance(spec, torch.Tensor):
             raise TypeError("Input must be a tensor")
@@ -280,13 +283,13 @@ class HybridDataset(Dataset):
         self.stat_feats = stat_feats
         self.labels = labels
         self.transform = transform
-    
+
     def __len__(self):
         return len(self.labels)
-    
+
     def __getitem__(self, idx):
         spec = self.specs[idx]
-        stat_feat = self.stat_feats[idx]
+        stat_feat = self.stat_feats[idx] + np.random.normal(0, 0.05, size=self.stat_feats[idx].shape)
         label = self.labels[idx]
         spec_tensor = torch.tensor(spec, dtype=torch.float32)
         if self.transform:
@@ -295,7 +298,7 @@ class HybridDataset(Dataset):
         return spec_tensor, stat_tensor, label
 
 # =====================================================================================
-# =                          הגדרת המודל: MobileNetV3 Small                           =
+# =                  הגדרת המודל: MobileNetV3 Small                           =
 # =====================================================================================
 class HybridGeoModel(nn.Module):
     """
@@ -304,23 +307,23 @@ class HybridGeoModel(nn.Module):
     """
     def __init__(self, dropout_p=0.4, stat_feature_dim=64, combined_dim=128):
         super(HybridGeoModel, self).__init__()
-        
+
         # טוענים את MobileNetV3 Small
         weights = MobileNet_V3_Small_Weights.DEFAULT
         self.cnn_backbone = mobilenet_v3_small(weights=weights)
-        
+
         # MobileNetV3 Small: נחפש את מספר הערוצים שיוצא מהתכונות
         # אפשר בשיטות שונות; אחת מהן: לקחת את ערוץ ה-output של השכבה האחרונה ב-features
         out_channels = self.cnn_backbone.features[-1][0].out_channels
         print(f"[DEBUG] MobileNetV3 out_channels: {out_channels}")
-        
+
         # נבטל את ה-classifier המקורי
         self.cnn_backbone.classifier = nn.Identity()
-        
+
         # אפשר להקפיא את משקולות ה-features (לא חובה)
-        for param in self.cnn_backbone.features.parameters():
-            param.requires_grad = False
-        
+        for param in self.cnn_backbone.features[-3:].parameters():
+            param.requires_grad = True
+
         # MLP לתכונות הסטטיסטיות
         self.stat_mlp = nn.Sequential(
             nn.LayerNorm(NUM_STAT_FEATURES),
@@ -330,12 +333,12 @@ class HybridGeoModel(nn.Module):
             nn.Linear(stat_feature_dim * 2, stat_feature_dim),
             nn.ReLU()
         )
-        
+
         # שכבות איחוד
         self.dropout = nn.Dropout(dropout_p)
         self.fc_combined = nn.Linear(out_channels + stat_feature_dim, combined_dim)
         self.fc_output = nn.Linear(combined_dim, NUM_CLASSES)
-    
+
     def forward(self, spec_input, stat_input):
         # 1) CNN על התמונה (spec_input)
         cnn_features = self.cnn_backbone(spec_input)  # צורה: (batch_size, out_channels)
@@ -362,17 +365,17 @@ def train_epoch_hybrid(model, dataloader, criterion, optimizer, device):
         stat_feats = stat_feats.to(device)
         labels = labels.to(device)
         optimizer.zero_grad()
-        
+
         outputs = model(specs, stat_feats)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
-        
+
         running_loss += loss.item() * labels.size(0)
         preds = outputs.argmax(dim=1)
         correct += (preds == labels).sum().item()
         total += labels.size(0)
-    
+
     epoch_loss = running_loss / total
     epoch_acc = correct / total
     return epoch_loss, epoch_acc
@@ -384,23 +387,24 @@ def evaluate_model_hybrid(model, dataloader, criterion, device):
     total = 0
     all_labels = []
     all_preds = []
+
     with torch.no_grad():
         for specs, stat_feats, labels in dataloader:
             specs = specs.to(device)
             stat_feats = stat_feats.to(device)
             labels = labels.to(device)
-            
+
             outputs = model(specs, stat_feats)
             loss = criterion(outputs, labels)
-            
+
             running_loss += loss.item() * labels.size(0)
             preds = outputs.argmax(dim=1)
             correct += (preds == labels).sum().item()
             total += labels.size(0)
-            
+
             all_labels.extend(labels.cpu().numpy())
             all_preds.extend(preds.cpu().numpy())
-    
+
     epoch_loss = running_loss / total
     epoch_acc = correct / total
     return epoch_loss, epoch_acc, all_labels, all_preds
@@ -417,7 +421,7 @@ def plot_fold_results(title, history, true_labels, pred_labels, new_true_labels=
     plt.title(f"{title} Loss")
     plt.xlabel("Epoch")
     plt.legend()
-    
+
     plt.subplot(1,2,2)
     plt.plot(history['train_acc'], label='Train Acc')
     plt.plot(history['val_acc'], label='Val Acc')
@@ -427,7 +431,7 @@ def plot_fold_results(title, history, true_labels, pred_labels, new_true_labels=
     plt.tight_layout()
     plt.savefig(f"{title}_training_history.png")
     plt.show()
-    
+
     # מטריצת בלבול (Validation)
     cm = confusion_matrix(true_labels, pred_labels)
     plt.figure(figsize=(6,5))
@@ -437,7 +441,9 @@ def plot_fold_results(title, history, true_labels, pred_labels, new_true_labels=
     plt.xlabel("Predicted")
     plt.savefig(f"{title}_val_cm.png")
     plt.show()
-    
+    print(f"Classification Report for {title} Val:")
+    print(classification_report(true_labels, pred_labels, target_names=CLASS_NAMES))
+
     # מטריצת בלבול (New Data), אם יש
     if new_true_labels is not None and new_pred_labels is not None:
         cm_new = confusion_matrix(new_true_labels, new_pred_labels)
@@ -469,7 +475,7 @@ def objective(trial):
     print("\n" + "="*70)
     print(f"Starting Optuna Trial #{trial.number} at {time.ctime()}")
     print("="*70)
-    
+
     # דגימת היפר-פרמטרים
     lr            = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
     dropout_p     = trial.suggest_float("dropout_p", 0.2, 0.6, step=0.1)
@@ -480,7 +486,7 @@ def objective(trial):
     specaug_time  = trial.suggest_int("specaug_time", 20, 60)
     specaug_fm    = trial.suggest_int("specaug_f_masks", 1, 2)
     specaug_tm    = trial.suggest_int("specaug_t_masks", 1, 2)
-    
+
     print(f"Chosen hyperparams: lr={lr:.1e}, dropout={dropout_p}, wd={weight_decay:.1e}, "
           f"stat_dim={stat_dim}, comb_dim={comb_dim}, freq_mask={specaug_freq}, "
           f"time_mask={specaug_time}, freq_masks={specaug_fm}, time_masks={specaug_tm}")
@@ -490,54 +496,55 @@ def objective(trial):
                     num_freq_masks=specaug_fm, num_time_masks=specaug_tm),
         transforms.Normalize(mean=imagenet_mean, std=imagenet_std)
     ])
-    
+
     gkf = GroupKFold(n_splits=N_SPLITS)
     fold_val_accs = []
     fold_recalls  = []
     fold_best_models = []
-    
+
     for fold, (train_idx, val_idx) in enumerate(gkf.split(orig_specs, orig_labels, groups=orig_groups)):
         print(f"\n  >>> Fold {fold+1}/{N_SPLITS} <<<")
         X_spec_train = orig_specs[train_idx]
         X_stat_train = orig_stat_feats[train_idx]
         y_train      = orig_labels[train_idx]
-        
+
         X_spec_val   = orig_specs[val_idx]
         X_stat_val   = orig_stat_feats[val_idx]
         y_val        = orig_labels[val_idx]
-        
+
         scaler = StandardScaler()
         X_stat_train = scaler.fit_transform(X_stat_train)
         X_stat_val   = scaler.transform(X_stat_val)
-        
+
         train_dataset = HybridDataset(X_spec_train, X_stat_train, y_train, transform=current_train_transforms)
         val_dataset   = HybridDataset(X_spec_val, X_stat_val, y_val, transform=val_transforms)
-        
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
-        val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
-        
+
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=8)
+        val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False, num_workers=8)
+
         model = HybridGeoModel(dropout_p=dropout_p, stat_feature_dim=stat_dim, combined_dim=comb_dim).to(device)
-        criterion = nn.CrossEntropyLoss()
+        class_weights = torch.tensor([1/65, 1/81, 1/226], device=device)
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
         optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=lr, weight_decay=weight_decay)
-        
+
         best_val_acc = 0.0
         best_val_loss = float('inf')
         best_model_state = None
         epochs_no_improve = 0
-        
+
         history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
-        
+
         for epoch in range(1, EPOCHS+1):
             train_loss, train_acc = train_epoch_hybrid(model, train_loader, criterion, optimizer, device)
             val_loss, val_acc, val_labels, val_preds = evaluate_model_hybrid(model, val_loader, criterion, device)
-            
+
             history['train_loss'].append(train_loss)
             history['train_acc'].append(train_acc)
             history['val_loss'].append(val_loss)
             history['val_acc'].append(val_acc)
-            
+
             print(f"    Epoch {epoch:02d}: TrainAcc={train_acc:.4f}, ValAcc={val_acc:.4f}, ValLoss={val_loss:.4f}")
-            
+
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_val_acc = val_acc
@@ -545,27 +552,31 @@ def objective(trial):
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
-            
+
             if epochs_no_improve >= PATIENCE:
                 print("    Early stopping triggered.")
                 break
-        
+
         fold_val_accs.append(best_val_acc)
-        
-        # הערכת הדאטה החדש
-        new_data_recall = 0.0
-        new_true = None
-        new_pred = None
-        if new_specs.size > 0:
-            new_stat_scaled = scaler.transform(new_stat_feats)
-            new_dataset = HybridDataset(new_specs, new_stat_scaled, new_labels, transform=val_transforms)
-            new_loader = DataLoader(new_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
-            _, _, new_true, new_pred = evaluate_model_hybrid(model, new_loader, criterion, device)
-            new_data_recall = recall_score(new_true, new_pred, average='macro', zero_division=0)
-            print(f"    New Data Recall: {new_data_recall:.4f}")
-        
+
+        if best_val_acc >= 0.80:
+            new_data_recall = 0.0
+            new_true = None
+            new_pred = None
+            if new_specs.size > 0:
+                new_stat_scaled = scaler.transform(new_stat_feats)
+                new_dataset = HybridDataset(new_specs, new_stat_scaled, new_labels, transform=val_transforms)
+                new_loader = DataLoader(new_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8)
+                _, _, new_true, new_pred = evaluate_model_hybrid(model, new_loader, criterion, device)
+                new_data_recall = recall_score(new_true, new_pred, average='macro', zero_division=0)
+                print(f"    New data recall: {new_data_recall:.4f}")
+        else:
+            print(f" FOld {fold+1} : Val ACC {best_val_acc:.4f} is below threshold 0.80. Skipping new data evaluation.")
+            new_data_recall = 0.0
+            new_true = None
+            new_pred = None
         fold_recalls.append(new_data_recall)
-        
+
         # נשמור את המודל של ה-Fold הזה רק אם ה-Recall החדש מעל סף
         if new_data_recall >= NEW_RECALL_THRESHOLD:
             fold_best_models.append({
@@ -582,21 +593,21 @@ def objective(trial):
             })
         else:
             print(f"    Fold {fold+1}: New Data Recall {new_data_recall:.4f} < {NEW_RECALL_THRESHOLD:.2f}, model not saved.")
-    
+
     # חישוב ממוצעים וסקור משולב
     avg_val_acc = np.mean(fold_val_accs)
     avg_recall  = np.mean(fold_recalls)
     combined_score = 0.3 * avg_val_acc + 0.7 * avg_recall
-    
+
     print(f"\n  === Results for Trial #{trial.number} ===")
     print(f"  Avg Val Acc = {avg_val_acc:.4f}, Avg New Recall = {avg_recall:.4f}, Combined Score = {combined_score:.4f}")
     print("  " + "-"*60)
-    
+
     trial.report(combined_score, step=0)
     if trial.should_prune():
         print("  Trial pruned by Optuna.")
         raise optuna.exceptions.TrialPruned()
-    
+
     trial.set_user_attr("fold_models", fold_best_models)
     return combined_score
 
@@ -613,6 +624,7 @@ print("\n=== Optimization finished. ===")
 print(f"Number of finished trials: {len(study.trials)}")
 
 best_trial = study.best_trial
+trial = study.best_trial
 print(f"Best trial found: #{best_trial.number} with value (score) = {best_trial.value:.4f}")
 
 # =====================================================================================
@@ -628,10 +640,10 @@ if fold_models:
         model_info = fold_models[i]
         fold_num   = model_info['fold']
         recall_val = model_info['new_recall']
-        
-        model_filename = os.path.join(SAVE_PATH_BASE, 
+
+        model_filename = os.path.join(SAVE_PATH_BASE,
             f"best_model_trial{best_trial.number}_fold{fold_num}_recall{recall_val:.4f}.pth")
-        
+
         torch.save({
             'model_state_dict': model_info['state_dict'],
             'fold': fold_num,
@@ -640,9 +652,9 @@ if fold_models:
             'params': best_trial.params,
             'scaler': model_info['scaler']
         }, model_filename)
-        
+
         print(f"  Saved model for fold {fold_num} to: {model_filename}")
-        
+
         # הפקת גרפים
         plot_fold_results(
             f"Trial{best_trial.number}_Fold{fold_num}",
