@@ -1,52 +1,191 @@
-for fold, (train_idx, val_idx) in enumerate(gkf.split(orig_specs, orig_labels, groups=orig_groups)):
-        print(f"\n  >>> Fold {fold+1}/{N_SPLITS} <<<")
+# === קוד חדש ונפרד להדגמת השפעת הסינון ===
 
-        # נתונים מקוריים ל-Fold הנוכחי
-        X_spec_train_orig = orig_specs[train_idx]
-        X_stat_train_orig = orig_stat_feats[train_idx]
-        y_train_orig      = orig_labels[train_idx]
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.signal import butter, filtfilt
+from sklearn.impute import SimpleImputer
+import os
+import warnings
 
-        X_spec_val   = orig_specs[val_idx]
-        X_stat_val   = orig_stat_feats[val_idx]
-        y_val        = orig_labels[val_idx]
+warnings.filterwarnings("ignore")
 
-        # החלת SMOTE רק על התכונות הסטטיסטיות והתוויות
-        print(f"    Original train samples: {len(y_train_orig)}")
-        smote = SMOTE(random_state=42, k_neighbors=min(5, len(y_train_orig)-1)) # התאמת k_neighbors
-        X_stat_train_smote, y_train_smote = smote.fit_resample(X_stat_train_orig, y_train_orig)
-        print(f"    Train samples after SMOTE: {len(y_train_smote)}")
+print("--- Visualization Script for Filter Effects ---")
 
-        # --- התיקון ---
-        # יצירת ספקטרוגרמות תואמות לגודל החדש
-        num_original_train = len(X_spec_train_orig)
-        num_total_smote = len(y_train_smote)
+# =====================================================================================
+# =                             הגדרות (מועתקות מהקוד הראשי)                           =
+# =====================================================================================
+# פרמטרים לעיבוד אות
+window_size    = 2000  # ב-milliseconds (גודל החלון לדוגמה)
+fs             = 1000.0 # קצב דגימה ב-Hz
+max_channels   = 37     # מספר ערוצים מקסימלי (לצורך ריפוד)
+channel_to_plot = 0     # אינדקס הערוץ להדגמה (0 הוא הראשון)
 
-        if num_total_smote > num_original_train:
-            # צריך להוסיף ספקטרוגרמות
-            num_to_add = num_total_smote - num_original_train
-            # דוגמים אינדקסים רנדומליים *מהמקור* כדי לשכפל ספקטרוגרמות
-            random_indices = np.random.choice(num_original_train, size=num_to_add, replace=True)
-            specs_to_add = X_spec_train_orig[random_indices]
-            # מחברים את הספקטרוגרמות המקוריות עם המשוכפלות
-            X_spec_train_final = np.concatenate((X_spec_train_orig, specs_to_add), axis=0)
+# פרמטרים למסנן Butterworth
+lowcut         = 1.0    # Hz
+highcut        = 100.0  # Hz
+order          = 4
+
+# נתיבים לקבצי הדוגמה (יש לוודא שהם נכונים בסביבה הנוכחית)
+# יש לוודא שהקבצים man.csv, car.csv, nothing.csv נמצאים באותה תיקייה
+# או לספק את הנתיב המלא אליהם.
+ORIGINAL_DATA_PATHS = {
+    0: {'path': ['man.csv']},           # LABEL_STEPS
+    1: {'path': ['car.csv']},           # LABEL_VEHICLE (ניקח רק את הראשון לדוגמה)
+    2: {'path': ['nothing.csv']}        # LABEL_NOISE (ניקח רק את הראשון לדוגמה)
+}
+CLASS_NAMES    = ["Steps (man.csv)", "Vehicle (car.csv)", "Noise (nothing.csv)"] # שמות לייצוג
+
+# =====================================================================================
+# =                             פונקציית עזר (מועתקת מהקוד הראשי)                       =
+# =====================================================================================
+
+def pad_channels(data, target_channels):
+    """מרפד או חותך ערוצים כדי להגיע למספר היעד."""
+    if data.ndim == 1:
+        data = data.reshape(-1, 1)
+    current_channels = data.shape[1]
+    if current_channels < target_channels:
+        padding = np.zeros((data.shape[0], target_channels - current_channels), dtype=data.dtype)
+        return np.hstack((data, padding))
+    elif current_channels > target_channels:
+        return data[:, :target_channels]
+    else:
+        return data
+
+# =====================================================================================
+# =                      הכנת המסנן ויצירת הגרפים                                     =
+# =====================================================================================
+
+# 1. תכנון המסנן
+try:
+    nyquist = 0.5 * fs
+    low = lowcut / nyquist
+    high = highcut / nyquist
+    # b, a הם מקדמי המסנן
+    b, a = butter(order, [low, high], btype='band')
+    print(f"Butterworth filter (order={order}, lowcut={lowcut} Hz, highcut={highcut} Hz) designed successfully.")
+    print("-" * 30)
+except ValueError as ve:
+     print(f"Error designing the filter: {ve}")
+     print("Check if lowcut < highcut and both are within valid range (0, fs/2).")
+     exit()
+except Exception as e:
+    print(f"An unexpected error occurred during filter design: {e}")
+    exit()
+
+# 2. וקטור זמן עבור הגרפים (באורך חלון אחד)
+time_vector = np.arange(window_size) / fs
+
+# 3. לולאה על כל מחלקה להדגמה
+for label, class_name in zip(ORIGINAL_DATA_PATHS.keys(), CLASS_NAMES):
+    # ניקח את הקובץ הראשון שהוגדר למחלקה זו
+    filepath = ORIGINAL_DATA_PATHS[label]['path'][0]
+    print(f"Processing example from: {filepath} (Class: {class_name})")
+
+    if not os.path.exists(filepath):
+        print(f"  ERROR: File not found at '{filepath}'. Please check the path.")
+        print("-" * 30)
+        continue
+
+    try:
+        # 3.1. טעינת הנתונים
+        df = pd.read_csv(filepath, header=None)
+
+        # 3.2. טיפול בערכים חסרים (אסטרטגיית ממוצע)
+        df_original_shape = df.shape
+        df = df.dropna(how='all') # הסרת שורות ריקות לחלוטין
+        if df.empty:
+             print(f"  ERROR: Dataframe is empty after dropping all-NaN rows in {filepath}")
+             print("-" * 30)
+             continue
+        imputer = SimpleImputer(strategy='mean')
+        # שימוש ב-values מבטיח שנקבל numpy array
+        data_imputed = imputer.fit_transform(df.values)
+
+        # 3.3. ריפוד או חיתוך ערוצים
+        data_padded = pad_channels(data_imputed, max_channels)
+
+        # 3.4. בדיקה אם יש מספיק נתונים לחלון אחד
+        if data_padded.shape[0] < window_size:
+            print(f"  WARNING: Not enough data in {filepath} for a full window ({data_padded.shape[0]} < {window_size}). Skipping visualization for this file.")
+            print("-" * 30)
+            continue
+
+        # 3.5. לקיחת חלון אחד וערוץ אחד (כפי שהוגדר ב-channel_to_plot)
+        # מוודאים שאינדקס הערוץ תקין
+        if channel_to_plot >= data_padded.shape[1]:
+             print(f"  WARNING: channel_to_plot ({channel_to_plot}) is out of bounds for available channels ({data_padded.shape[1]}). Using channel 0 instead.")
+             current_channel_to_plot = 0
         else:
-             # אם SMOTE לא הוסיף דגימות (נדיר, אולי אם המחלקות כבר מאוזנות)
-            X_spec_train_final = X_spec_train_orig
+             current_channel_to_plot = channel_to_plot
 
-        # ודא שכל המערכים באותו גודל
-        assert len(X_spec_train_final) == len(X_stat_train_smote) == len(y_train_smote), \
-               f"Mismatch after SMOTE! Specs: {len(X_spec_train_final)}, Stats: {len(X_stat_train_smote)}, Labels: {len(y_train_smote)}"
-        # -------------
+        window_data_original = data_padded[:window_size, current_channel_to_plot]
+        print(f"  Extracted first {window_size} samples from channel {current_channel_to_plot}.")
 
-        # Scaling רק *אחרי* SMOTE (על הנתונים המורחבים)
-        scaler = StandardScaler()
-        X_stat_train_scaled = scaler.fit_transform(X_stat_train_smote) # שימוש בנתונים אחרי SMOTE
-        X_stat_val_scaled   = scaler.transform(X_stat_val) # שימוש בנתוני ה-Val המקוריים
+        # 3.6. החלת הסינון על החלון
+        window_data_filtered = filtfilt(b, a, window_data_original)
+        print("  Applied Butterworth filter.")
 
-        # יצירת ה-Datasets עם הגדלים התואמים
-        train_dataset = HybridDataset(X_spec_train_final, X_stat_train_scaled, y_train_smote, transform=current_train_transforms)
-        val_dataset   = HybridDataset(X_spec_val, X_stat_val_scaled, y_val, transform=val_transforms)
+        # 3.7. חישוב ספקטרום תדרים (FFT) להצגה
+        fft_original = np.fft.fft(window_data_original)
+        fft_filtered = np.fft.fft(window_data_filtered)
+        # חישוב התדרים המתאימים
+        freqs = np.fft.fftfreq(window_size, 1/fs)
 
-        # המשך הקוד כרגיל...
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=8)
-        val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False, num_workers=8)
+        # לוקחים רק את התדרים החיוביים (כולל 0) ואת המגניטודות שלהם
+        positive_freq_indices = np.where(freqs >= 0)
+        freqs_pos = freqs[positive_freq_indices]
+        fft_mag_original = np.abs(fft_original[positive_freq_indices])
+        fft_mag_filtered = np.abs(fft_filtered[positive_freq_indices])
+        print("  Calculated FFT.")
+
+        # 3.8. יצירת והצגת הגרפים
+        fig, axes = plt.subplots(2, 1, figsize=(12, 8)) # יצירת שני תתי-גרפים (אחד מעל השני)
+
+        # --- גרף תחום הזמן ---
+        axes[0].plot(time_vector, window_data_original, label='Original Signal', alpha=0.7, linewidth=1)
+        axes[0].plot(time_vector, window_data_filtered, label=f'Filtered Signal ({lowcut}-{highcut} Hz)', alpha=0.9, color='red', linewidth=1.5)
+        axes[0].set_title(f'Time Domain Signal (Window 1, Channel {current_channel_to_plot}) - {class_name}')
+        axes[0].set_xlabel('Time (seconds)')
+        axes[0].set_ylabel('Amplitude')
+        axes[0].legend()
+        axes[0].grid(True, which='both', linestyle='--', linewidth=0.5)
+
+        # --- גרף תחום התדר ---
+        axes[1].plot(freqs_pos, fft_mag_original, label='Original Spectrum', alpha=0.7, linewidth=1)
+        axes[1].plot(freqs_pos, fft_mag_filtered, label=f'Filtered Spectrum ({lowcut}-{highcut} Hz)', alpha=0.9, color='red', linewidth=1.5)
+        # הוספת קווים אנכיים ב-lowcut ו-highcut
+        axes[1].axvline(lowcut, color='grey', linestyle='--', linewidth=1.5, label=f'Cutoff ({lowcut} Hz)')
+        axes[1].axvline(highcut, color='grey', linestyle=':', linewidth=1.5, label=f'Cutoff ({highcut} Hz)')
+        axes[1].set_title(f'Frequency Domain (Magnitude Spectrum) - {class_name}')
+        axes[1].set_xlabel('Frequency (Hz)')
+        axes[1].set_ylabel('Magnitude')
+        # הגבלת ציר X כדי לראות טוב יותר את אזור הסינון
+        # הצג עד פי 1.5 מה-highcut או עד 200Hz, הקטן מביניהם, כדי לא להציג יותר מדי
+        xlim_upper = min(highcut * 1.5, 200)
+        axes[1].set_xlim(0, xlim_upper)
+        axes[1].legend()
+        axes[1].grid(True, which='both', linestyle='--', linewidth=0.5)
+        # אפשר להפעיל סקאלה לוגריתמית אם יש הבדלים גדולים במגניטודה
+        # axes[1].set_yscale('log')
+
+        fig.tight_layout() # סידור אוטומטי של הגרפים למניעת חפיפות
+        plt.show() # הצגת הגרף לדוגמה הנוכחית
+        print("  Displayed plots.")
+        print("-" * 30)
+
+    except FileNotFoundError:
+         # כבר טופל למעלה, אבל טוב שיהיה גם כאן
+        print(f"  ERROR: File not found at '{filepath}'.")
+        print("-" * 30)
+    except pd.errors.EmptyDataError:
+        print(f"  ERROR: File '{filepath}' is empty or contains no data.")
+        print("-" * 30)
+    except Exception as e:
+        print(f"  An unexpected error occurred while processing {filepath}: {e}")
+        import traceback
+        traceback.print_exc() # הדפסת פרטי השגיאה המלאים
+        print("-" * 30)
+
+print("--- Visualization Script Finished ---")
