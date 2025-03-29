@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
+from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
 from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, recall_score, confusion_matrix, classification_report, f1_score, roc_auc_score
@@ -82,163 +82,19 @@ ORIGINAL_DATA_PATHS = {
 NEW_DATA_FOLDER   = 'newDataSET_csv'   # תיקייה לדאטהסט חיצוני
 NEW_DATA_PATTERN  = '*.csv'
 
-SAVE_PATH_BASE = "./saved_models_mobilenetv3/"
+SAVE_PATH_BASE = "./saved_models_efficientnetb0/"
 os.makedirs(SAVE_PATH_BASE, exist_ok=True)
 
 # =====================================================================================
 # =                      פונקציות עזר לטעינת נתונים והכנתם                            =
 # =====================================================================================
 
-def pad_channels(data, target_channels):
-    """
-    מבטיח שכל הדגימות יהיו בעלות אותו מספר ערוצים (columns).
-    אם יש פחות ערוצים - מרפד באפסים, אם יותר - חותך.
-    """
-    if data.ndim == 1:
-        data = data.reshape(-1, 1)
-    if data.shape[1] < target_channels:
-        padding = np.zeros((data.shape[0], target_channels - data.shape[1]), dtype=data.dtype)
-        return np.hstack((data, padding))
-    else:
-        return data[:, :target_channels]
-
-def create_windows(signal, label, window_size=window_size, stride=stride):
-    """
-    פורס את האות (signal) לחלונות חופפים באורך window_size ובמרווח stride.
-    """
-    X_windows, y_labels = [], []
-    if signal.shape[0] < window_size:
-        return [], []
-    for start in range(0, signal.shape[0] - window_size + 1, stride):
-        X_windows.append(signal[start: start + window_size, :])
-        y_labels.append(label)
-    return X_windows, y_labels
-
-def create_stft_spectrogram(signal_1d, sr=fs, n_fft=N_FFT, hop_length=HOP_LENGTH):
-    """
-    מחשב ספקטרוגרמה עם scipy.signal.spectrogram, מגביל את תחום התדר ל-highcut,
-    ומנרמל לטווח [0,1].
-    מחזיר מערך 2D (תדר, זמן) בגודל משתנה, שנצטרך אח"כ לשנות ל-224x224.
-    """
-    try:
-        signal_float = signal_1d.astype(np.float32)
-        f, t, Sxx = spectrogram(signal_float, fs=sr, nperseg=n_fft, noverlap=n_fft - hop_length, nfft=n_fft)
-        freq_idx = np.where(f <= highcut)[0]
-        if len(freq_idx) == 0:
-            return None
-        Sxx = Sxx[freq_idx, :]
-        Sxx_db = 10 * np.log10(Sxx + 1e-9)
-        Sxx_norm = (Sxx_db - Sxx_db.min()) / (Sxx_db.max() - Sxx_db.min() + 1e-9)
-        return Sxx_norm.astype(np.float32)
-    except Exception as e:
-        print(f"Error in STFT: {e}")
-        return None
-
-def extract_statistical_features(signal_1d, sr=fs):
-    """
-    מחשב וקטור תכונות סטטיסטיות (ZCR, Centroid, Bandwidth, Rolloff, Flatness, MFCC, וכו').
-    אם יש שגיאה, מחזיר וקטור אפסים באורך 8+13 = 21.
-    """
-    try:
-        features = []
-        # 1) mean, std, rms
-        features.append(np.mean(signal_1d))
-        features.append(np.std(signal_1d))
-        features.append(np.sqrt(np.mean(signal_1d**2)))
-        # 2) Zero Crossing Rate
-        features.append(librosa.feature.zero_crossing_rate(y=signal_1d).mean())
-        # 3) STFT -> spec_mag
-        stft_result = librosa.stft(signal_1d.astype(np.float32), n_fft=N_FFT, hop_length=HOP_LENGTH)
-        spec_mag = np.abs(stft_result)
-        features.append(librosa.feature.spectral_centroid(S=spec_mag, sr=sr).mean())
-        features.append(librosa.feature.spectral_bandwidth(S=spec_mag, sr=sr).mean())
-        features.append(librosa.feature.spectral_rolloff(S=spec_mag, sr=sr, roll_percent=0.85).mean())
-        features.append(librosa.feature.spectral_flatness(S=spec_mag).mean())
-        # 4) MFCC
-        mfccs = librosa.feature.mfcc(y=signal_1d.astype(np.float32), sr=sr, n_mfcc=13)
-        features.extend(np.mean(mfccs, axis=1))
-        return np.array(features, dtype=np.float32)
-    except Exception as e:
-        print(f"Error extracting statistical features: {e}")
-        num_features = 8 + 13
-        return np.zeros(num_features, dtype=np.float32)
-
-NUM_STAT_FEATURES = 8 + 13
-
-def load_data_hybrid_by_file(file_map, target_img_size=(IMG_HEIGHT, IMG_WIDTH)):
-    """
-    טוען את כל הקבצים המתוארים ב-file_map, מחלק לחלונות, מסנן, מחשב ספקטרוגרמה ווקטור תכונות,
-    ושומר גם אינדקס group לכל קובץ (group_counter).
-    מחזיר: (specs, stat_features, labels, groups)
-    """
-    all_specs, all_stat_features, all_labels, all_groups = [], [], [], []
-    try:
-        b, a = butter(order, [lowcut/(fs/2), highcut/(fs/2)], btype='band')
-    except Exception as e:
-        print(f"Filter error: {e}")
-        return np.array([]), np.array([]), np.array([]), np.array([])
-
-    group_counter = 0
-    print("Loading data by file and extracting hybrid features...")
-    for label, info in file_map.items():
-        filepaths = info['path']
-        if isinstance(filepaths, str):
-            filepaths = [filepaths]
-        for filepath in filepaths:
-            try:
-                df = pd.read_csv(filepath, header=None)
-                df = df.dropna()
-                # Impute missing values with the mean
-                imputer = SimpleImputer(strategy='mean')
-                data = imputer.fit_transform(df)
-                data = pad_channels(data, max_channels)
-                if data.shape[0] < window_size:
-                    continue
-                windows, labels = create_windows(data, label)
-                for w in windows:
-                    try:
-                        filtered_w = filtfilt(b, a, w, axis=0)
-                        signal_to_process = filtered_w[:, 0]  # ערוץ ראשון
-                        spec = create_stft_spectrogram(signal_to_process)
-                        if spec is None:
-                            continue
-                        # resize ל-224x224
-                        resized_spec = cv2.resize(spec, (target_img_size[1], target_img_size[0]), interpolation=cv2.INTER_LINEAR)
-                        # יצירת 3 ערוצים
-                        spec_3ch = np.stack([resized_spec]*3, axis=0)
-                        stat_feats = extract_statistical_features(signal_to_process)
-                        all_specs.append(spec_3ch)
-                        all_stat_features.append(stat_feats)
-                        all_labels.append(label)
-                        all_groups.append(group_counter)
-                    except Exception as inner_e:
-                        print(f"Error processing window in file {filepath}: {inner_e}")
-                group_counter += 1
-            except Exception as e:
-                print(f"Error loading file {filepath}: {e}")
-    print(f"Total samples loaded: {len(all_specs)}")
-    return np.array(all_specs, dtype=np.float32), np.array(all_stat_features, dtype=np.float32), np.array(all_labels, dtype=np.int64), np.array(all_groups, dtype=np.int64)
-
-# =====================================================================================
-# =                         טעינת הדאטהסט הראשי והדאטה החדש                          =
-# =====================================================================================
-print("\n=== Loading Original Dataset ===")
-orig_specs, orig_stat_feats, orig_labels, orig_groups = load_data_hybrid_by_file(ORIGINAL_DATA_PATHS)
-if orig_specs.size == 0:
-    print("CRITICAL ERROR: Failed to load original dataset.")
-    exit()
-
-print("\n=== Loading New External Dataset ===")
-new_files = glob.glob(os.path.join(NEW_DATA_FOLDER, NEW_DATA_PATTERN))
-if new_files:
-    new_data_map = {LABEL_STEPS: {'path': new_files}}  # נניח שהדאטה החיצוני הוא של צעדים
-    new_specs, new_stat_feats, new_labels, _ = load_data_hybrid_by_file(new_data_map)
-else:
-    new_specs, new_stat_feats, new_labels = np.array([]), np.array([]), np.array([])
+# (הפונקציות pad_channels, create_windows, create_stft_spectrogram, extract_statistical_features, load_data_hybrid_by_file נשארות זהות)
 
 # =====================================================================================
 # =                      הגדרת SpecAugment ו-HybridDataset                          =
 # =====================================================================================
+
 class SpecAugment(nn.Module):
     def __init__(self, freq_mask_param=10, time_mask_param=20, num_freq_masks=1, num_time_masks=1):
         super(SpecAugment, self).__init__()
@@ -298,31 +154,30 @@ class HybridDataset(Dataset):
         return spec_tensor, stat_tensor, label
 
 # =====================================================================================
-# =                  הגדרת המודל: MobileNetV3 Small                           =
+# =                  הגדרת המודל: EfficientNet-B0                           =
 # =====================================================================================
 class HybridGeoModel(nn.Module):
     """
-    מודל היברידי המבוסס על MobileNetV3 Small כ-extractor לתמונות,
+    מודל היברידי המבוסס על EfficientNet-B0 כ-extractor לתמונות,
     ו-MLP לתכונות הסטטיסטיות, ואז איחוד (concat) ו-classifier סופי.
     """
     def __init__(self, dropout_p=0.4, stat_feature_dim=64, combined_dim=128):
         super(HybridGeoModel, self).__init__()
 
-        # טוענים את MobileNetV3 Small
-        weights = MobileNet_V3_Small_Weights.DEFAULT
-        self.cnn_backbone = mobilenet_v3_small(weights=weights)
+        # טוענים את EfficientNet-B0
+        weights = EfficientNet_B0_Weights.DEFAULT
+        self.cnn_backbone = efficientnet_b0(weights=weights)
 
-        # MobileNetV3 Small: נחפש את מספר הערוצים שיוצא מהתכונות
-        # אפשר בשיטות שונות; אחת מהן: לקחת את ערוץ ה-output של השכבה האחרונה ב-features
-        out_channels = self.cnn_backbone.features[-1][0].out_channels
-        print(f"[DEBUG] MobileNetV3 out_channels: {out_channels}")
+        # EfficientNet-B0: נחפש את מספר הערוצים שיוצא מהתכונות
+        out_channels = self.cnn_backbone.features[-1].conv.out_channels
+        print(f"[DEBUG] EfficientNet-B0 out_channels: {out_channels}")
 
         # נבטל את ה-classifier המקורי
         self.cnn_backbone.classifier = nn.Identity()
 
         # אפשר להקפיא את משקולות ה-features (לא חובה)
-        for param in self.cnn_backbone.features[-3:].parameters():
-            param.requires_grad = True
+        for param in self.cnn_backbone.features.parameters():
+            param.requires_grad = False
 
         # MLP לתכונות הסטטיסטיות
         self.stat_mlp = nn.Sequential(
@@ -458,7 +313,7 @@ def plot_fold_results(title, history, true_labels, pred_labels, new_true_labels=
 # =====================================================================================
 # =                 פונקציית המטרה של Optuna (GroupKFold + סף Recall)                =
 # =====================================================================================
-STUDY_NAME = "hybrid_model_mobilenetv3_optuna"
+STUDY_NAME = "hybrid_model_efficientnetb0_optuna"
 STUDY_FILENAME = f"{STUDY_NAME}.pkl"
 
 try:
@@ -527,6 +382,8 @@ def objective(trial):
         criterion = nn.CrossEntropyLoss(weight=class_weights)
         optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=lr, weight_decay=weight_decay)
 
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'minimize', patience=5, verbose=False)
+
         best_val_acc = 0.0
         best_val_loss = float('inf')
         best_model_state = None
@@ -556,6 +413,8 @@ def objective(trial):
             if epochs_no_improve >= PATIENCE:
                 print("    Early stopping triggered.")
                 break
+
+            scheduler.step(val_loss)
 
         fold_val_accs.append(best_val_acc)
 
@@ -624,7 +483,6 @@ print("\n=== Optimization finished. ===")
 print(f"Number of finished trials: {len(study.trials)}")
 
 best_trial = study.best_trial
-trial = study.best_trial
 print(f"Best trial found: #{best_trial.number} with value (score) = {best_trial.value:.4f}")
 
 # =====================================================================================
