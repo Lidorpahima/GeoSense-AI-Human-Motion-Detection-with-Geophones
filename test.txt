@@ -1,7 +1,542 @@
-# ==============================================================================
-# === קוד Optuna משופר - מוגדר ספציפית עבור EfficientNet-B0 (גרסה מלאה ומתוקנת סופית) ===
-# === חיפוש, בחירת מודל יחיד, הערכה, ושמירה מותנית ===
-# ==============================================================================
+# =====================================================================================
+# קוד מלא, מתוקן סופית v1:
+# זיהוי צעדים / רכבים / שקט באמצעות מודל היברידי (MobileNetV3+MLP)
+# חיפוש היפר-פרמטרים עם Optuna (GroupKFold מבוסס קבצים)
+# =====================================================================================
+
+# --- 1. ייבוא ספריות והגדרות ---
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader, Subset
+from torchvision import transforms
+from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
+from sklearn.model_selection import GroupKFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, recall_score, confusion_matrix, classification_report
+from scipy.signal import butter, filtfilt, spectrogram
+import librosa
+import matplotlib.pyplot as plt
+import seaborn as sns
+import cv2
+import optuna
+import joblib
+import os
+import glob
+import time
+import random
+from copy import deepcopy
+import warnings
+
+warnings.filterwarnings("ignore")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+# --- הגדרות גלובליות ---
+# תוויות: נניח 'man.csv' = צעדים, 'car.csv' ו-'car2.csv' = רכבים, 'nothing.csv' ו-'nothing2.csv' = שקט
+LABEL_STEPS    = 0
+LABEL_VEHICLE  = 1
+LABEL_NOISE    = 2
+CLASS_NAMES    = ["Steps", "Vehicle", "Noise"]
+NUM_CLASSES    = 3
+
+# הגדרות עיבוד אות
+window_size    = 2000   # יש לעדכן בהתאם לאורך ההקלטות (ב-milliseconds)
+stride         = 500
+fs             = 1000.0
+max_channels   = 37      # מספר הסנסורים שלך
+
+# הגדרות STFT
+N_FFT          = 512
+HOP_LENGTH     = N_FFT // 4
+N_FREQ_BINS    = N_FFT // 2 + 1
+
+# גודל תמונה (לכניסה למודל CNN)
+IMG_HEIGHT     = 224
+IMG_WIDTH      = 224
+
+# הגדרות לסינון (Butterworth)
+lowcut         = 1.0
+highcut        = 100.0
+order          = 4
+
+# הגדרות אימון ואופטימיזציה
+N_SPLITS       = 5
+EPOCHS         = 30
+PATIENCE       = 8
+BATCH_SIZE     = 32
+TIMEOUT_SECONDS = 4 * 3600  # 4 שעות
+TOP_N_MODELS   = 5
+MIN_VAL_ACC_THRESHOLD = 0.80
+
+# נתיבי הקבצים
+ORIGINAL_DATA_PATHS = {
+    LABEL_STEPS:   {'path': ['man.csv']},
+    LABEL_VEHICLE: {'path': ['car.csv', 'car2.csv']},
+    LABEL_NOISE:   {'path': ['nothing.csv', 'nothing2.csv']}
+}
+NEW_DATA_FOLDER   = 'newDataSET_csv'   # תיקייה לדאטהסט חיצוני
+NEW_DATA_PATTERN  = '*.csv'
+
+# נתיב לשמירת המודלים
+SAVE_PATH_BASE = f"./saved_models_hybrid/"
+os.makedirs(SAVE_PATH_BASE, exist_ok=True)
+
+# --- 2. פונקציות עזר לעיבוד נתונים ---
+def pad_channels(data, target_channels):
+    if data.ndim == 1:
+        data = data.reshape(-1, 1)
+    if data.shape[1] < target_channels:
+        padding = np.zeros((data.shape[0], target_channels - data.shape[1]), dtype=data.dtype)
+        return np.hstack((data, padding))
+    else:
+        return data[:, :target_channels]
+
+def create_windows(signal, label, window_size=window_size, stride=stride):
+    X_windows, y_labels = [], []
+    if signal.shape[0] < window_size:
+        return [], []
+    for start in range(0, signal.shape[0] - window_size + 1, stride):
+        X_windows.append(signal[start: start + window_size, :])
+        y_labels.append(label)
+    return X_windows, y_labels
+
+def create_stft_spectrogram(signal_1d, sr=fs, n_fft=N_FFT, hop_length=HOP_LENGTH):
+    try:
+        signal_float = signal_1d.astype(np.float32)
+        f, t, Sxx = spectrogram(signal_float, fs=sr, nperseg=n_fft, noverlap=n_fft - hop_length, nfft=n_fft)
+        # הגבלת תדר עד highcut
+        freq_idx = np.where(f <= highcut)[0]
+        if len(freq_idx) == 0:
+            return None
+        Sxx = Sxx[freq_idx, :]
+        Sxx_db = 10 * np.log10(Sxx + 1e-9)
+        Sxx_norm = (Sxx_db - Sxx_db.min()) / (Sxx_db.max() - Sxx_db.min() + 1e-9)
+        return Sxx_norm.astype(np.float32)
+    except Exception as e:
+        print(f"Error in STFT: {e}")
+        return None
+
+def extract_statistical_features(signal_1d, sr=fs):
+    try:
+        features = []
+        features.append(np.mean(signal_1d))
+        features.append(np.std(signal_1d))
+        features.append(np.sqrt(np.mean(signal_1d**2)))
+        features.append(librosa.feature.zero_crossing_rate(y=signal_1d).mean())
+        stft_result = librosa.stft(signal_1d.astype(np.float32), n_fft=N_FFT, hop_length=HOP_LENGTH)
+        spec_mag = np.abs(stft_result)
+        features.append(librosa.feature.spectral_centroid(S=spec_mag, sr=sr).mean())
+        features.append(librosa.feature.spectral_bandwidth(S=spec_mag, sr=sr).mean())
+        features.append(librosa.feature.spectral_rolloff(S=spec_mag, sr=sr, roll_percent=0.85).mean())
+        features.append(librosa.feature.spectral_flatness(S=spec_mag).mean())
+        mfccs = librosa.feature.mfcc(y=signal_1d.astype(np.float32), sr=sr, n_mfcc=13)
+        features.extend(np.mean(mfccs, axis=1))
+        return np.array(features, dtype=np.float32)
+    except Exception as e:
+        print(f"Error extracting statistical features: {e}")
+        num_features = 8 + 13
+        return np.zeros(num_features, dtype=np.float32)
+
+NUM_STAT_FEATURES = 8 + 13
+
+def load_data_hybrid_by_file(file_map, target_img_size=(IMG_HEIGHT, IMG_WIDTH)):
+    all_specs, all_stat_features, all_labels, all_groups = [], [], [], []
+    try:
+        b, a = butter(order, [lowcut/(fs/2), highcut/(fs/2)], btype='band')
+    except Exception as e:
+        print(f"Filter error: {e}")
+        return np.array([]), np.array([]), np.array([]), np.array([])
+    
+    group_counter = 0
+    print("Loading data by file and extracting hybrid features...")
+    for label, info in file_map.items():
+        filepaths = info['path']
+        if isinstance(filepaths, str):
+            filepaths = [filepaths]
+        for filepath in filepaths:
+            try:
+                df = pd.read_csv(filepath, header=None)
+                df = df.dropna()
+                data = df.values
+                data = pad_channels(data, max_channels)
+                if data.shape[0] < window_size:
+                    continue
+                windows, labels = create_windows(data, label)
+                for w in windows:
+                    try:
+                        filtered_w = filtfilt(b, a, w, axis=0)
+                        # בוחרים את הערוץ הראשון
+                        signal_to_process = filtered_w[:, 0]
+                        spec = create_stft_spectrogram(signal_to_process)
+                        if spec is None:
+                            continue
+                        resized_spec = cv2.resize(spec, (target_img_size[1], target_img_size[0]), interpolation=cv2.INTER_LINEAR)
+                        spec_3ch = np.stack([resized_spec]*3, axis=0)  # צורת (3, H, W)
+                        stat_feats = extract_statistical_features(signal_to_process)
+                        all_specs.append(spec_3ch)
+                        all_stat_features.append(stat_feats)
+                        all_labels.append(label)
+                        all_groups.append(group_counter)
+                    except Exception as inner_e:
+                        print(f"Error processing window in file {filepath}: {inner_e}")
+                group_counter += 1
+            except Exception as e:
+                print(f"Error loading file {filepath}: {e}")
+    print(f"Total samples loaded: {len(all_specs)}")
+    return np.array(all_specs, dtype=np.float32), np.array(all_stat_features, dtype=np.float32), np.array(all_labels, dtype=np.int64), np.array(all_groups, dtype=np.int64)
+
+# --- 3. טעינת הנתונים ---
+print("\n--- Loading Original Dataset ---")
+orig_specs, orig_stat_feats, orig_labels, orig_groups = load_data_hybrid_by_file(ORIGINAL_DATA_PATHS)
+if orig_specs.size == 0:
+    print("CRITICAL ERROR: Failed to load original dataset.")
+    exit()
+
+print("\n--- Loading New External Dataset ---")
+new_files = glob.glob(os.path.join(NEW_DATA_FOLDER, NEW_DATA_PATTERN))
+if new_files:
+    new_data_map = {LABEL_STEPS: {'path': new_files}}  # נניח שהדאטה החיצוני הוא של צעדים
+    new_specs, new_stat_feats, new_labels, _ = load_data_hybrid_by_file(new_data_map)
+else:
+    new_specs, new_stat_feats, new_labels = np.array([]), np.array([]), np.array([])
+
+# --- 4. הגדרת טרנספורמציות ודאטהסט ---
+class SpecAugment(nn.Module):
+    def __init__(self, freq_mask_param=10, time_mask_param=20, num_freq_masks=1, num_time_masks=1):
+        super(SpecAugment, self).__init__()
+        self.freq_mask_param = freq_mask_param
+        self.time_mask_param = time_mask_param
+        self.num_freq_masks = num_freq_masks
+        self.num_time_masks = num_time_masks
+    
+    def forward(self, spec):
+        if not isinstance(spec, torch.Tensor):
+            raise TypeError("Input must be a tensor")
+        spec_aug = spec.clone()
+        _, F, T = spec_aug.shape
+        for _ in range(self.num_freq_masks):
+            f = random.randrange(0, self.freq_mask_param)
+            f0 = random.randrange(0, max(1, F - f))
+            spec_aug[:, f0:f0+f, :] = spec_aug.mean()
+        for _ in range(self.num_time_masks):
+            t = random.randrange(0, self.time_mask_param)
+            t0 = random.randrange(0, max(1, T - t))
+            spec_aug[:, :, t0:t0+t] = spec_aug.mean()
+        return spec_aug
+
+imagenet_mean = [0.485, 0.456, 0.406]
+imagenet_std  = [0.229, 0.224, 0.225]
+
+train_transforms = transforms.Compose([
+    SpecAugment(freq_mask_param=15, time_mask_param=30, num_freq_masks=1, num_time_masks=1),
+    transforms.Normalize(mean=imagenet_mean, std=imagenet_std)
+])
+val_transforms = transforms.Compose([
+    transforms.Normalize(mean=imagenet_mean, std=imagenet_std)
+])
+
+class HybridDataset(Dataset):
+    def __init__(self, specs, stat_feats, labels, transform=None):
+        self.specs = specs
+        self.stat_feats = stat_feats
+        self.labels = labels
+        self.transform = transform
+    
+    def __len__(self):
+        return len(self.labels)
+    
+    def __getitem__(self, idx):
+        spec = self.specs[idx]      # צורה: (3, H, W)
+        stat_feat = self.stat_feats[idx]
+        label = self.labels[idx]
+        spec_tensor = torch.tensor(spec, dtype=torch.float32)
+        if self.transform:
+            spec_tensor = self.transform(spec_tensor)
+        stat_tensor = torch.tensor(stat_feat, dtype=torch.float32)
+        return spec_tensor, stat_tensor, label
+
+# --- 5. הגדרת המודל ההיברידי ---
+import torch.nn.functional as F
+
+class HybridGeoModel(nn.Module):
+    def __init__(self, dropout_p=0.4, stat_feature_dim=64, combined_dim=128):
+        super(HybridGeoModel, self).__init__()
+        weights = MobileNet_V3_Small_Weights.DEFAULT
+        self.cnn_backbone = mobilenet_v3_small(weights=weights)
+        # הסרת שכבת הסיווג האחרונה
+        cnn_out_features = self.cnn_backbone.classifier[3].in_features
+        self.cnn_backbone.classifier = nn.Identity()
+        # הקפאת חלק מהמשקולות
+        for param in self.cnn_backbone.features.parameters():
+            param.requires_grad = False
+        # MLP עבור תכונות סטטיסטיות
+        self.stat_mlp = nn.Sequential(
+            nn.LayerNorm(NUM_STAT_FEATURES),
+            nn.Linear(NUM_STAT_FEATURES, stat_feature_dim * 2),
+            nn.ReLU(),
+            nn.Dropout(dropout_p),
+            nn.Linear(stat_feature_dim * 2, stat_feature_dim),
+            nn.ReLU()
+        )
+        # שילוב תכונות
+        self.dropout = nn.Dropout(dropout_p)
+        self.fc_combined = nn.Linear(cnn_out_features + stat_feature_dim, combined_dim)
+        self.fc_output   = nn.Linear(combined_dim, NUM_CLASSES)
+    
+    def forward(self, spec_input, stat_input):
+        cnn_features = self.cnn_backbone(spec_input)
+        stat_features = self.stat_mlp(stat_input)
+        combined = torch.cat((cnn_features, stat_features), dim=1)
+        x = self.dropout(combined)
+        x = F.relu(self.fc_combined(x))
+        x = self.dropout(x)
+        output = self.fc_output(x)
+        return output
+
+# --- 6. פונקציות אימון והערכה ---
+def train_epoch_hybrid(model, dataloader, criterion, optimizer, device):
+    model.train()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+    for specs, stat_feats, labels in dataloader:
+        specs = specs.to(device)
+        stat_feats = stat_feats.to(device)
+        labels = labels.to(device)
+        optimizer.zero_grad()
+        outputs = model(specs, stat_feats)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item() * labels.size(0)
+        preds = outputs.argmax(dim=1)
+        correct += (preds == labels).sum().item()
+        total += labels.size(0)
+    epoch_loss = running_loss / total
+    epoch_acc = correct / total
+    return epoch_loss, epoch_acc
+
+def evaluate_model_hybrid(model, dataloader, criterion, device):
+    model.eval()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+    all_labels = []
+    all_preds = []
+    with torch.no_grad():
+        for specs, stat_feats, labels in dataloader:
+            specs = specs.to(device)
+            stat_feats = stat_feats.to(device)
+            labels = labels.to(device)
+            outputs = model(specs, stat_feats)
+            loss = criterion(outputs, labels)
+            running_loss += loss.item() * labels.size(0)
+            preds = outputs.argmax(dim=1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(preds.cpu().numpy())
+    epoch_loss = running_loss / total
+    epoch_acc = correct / total
+    return epoch_loss, epoch_acc, all_labels, all_preds
+
+def plot_fold_results(title, history, true_labels, pred_labels):
+    plt.figure(figsize=(10,4))
+    plt.subplot(1,2,1)
+    plt.plot(history['train_loss'], label='Train Loss')
+    plt.plot(history['val_loss'], label='Val Loss')
+    plt.title(f"{title} Loss")
+    plt.legend()
+    plt.subplot(1,2,2)
+    plt.plot(history['train_acc'], label='Train Acc')
+    plt.plot(history['val_acc'], label='Val Acc')
+    plt.title(f"{title} Accuracy")
+    plt.legend()
+    plt.show()
+    # מטריצת בלבול
+    cm = confusion_matrix(true_labels, pred_labels)
+    plt.figure(figsize=(6,5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES)
+    plt.title(f"{title} Confusion Matrix")
+    plt.ylabel("True")
+    plt.xlabel("Predicted")
+    plt.show()
+
+# --- 7. פונקציית מטרה לאופטונה (עם GroupKFold) ---
+# נשתמש ב-Optuna לחיפוש היפר-פרמטרים
+STUDY_NAME = "hybrid_model_optuna"
+STUDY_FILENAME = f"{STUDY_NAME}.pkl"
+try:
+    study = joblib.load(STUDY_FILENAME)
+    print(f"Loaded study {STUDY_NAME}")
+except FileNotFoundError:
+    study = optuna.create_study(study_name=STUDY_NAME, direction="maximize")
+    
+def save_study_callback(study, trial):
+    joblib.dump(study, STUDY_FILENAME)
+
+def objective(trial):
+    start_time = time.time()
+    print(f"\n--- Optuna Trial {trial.number} ---")
+    # דגימת היפר-פרמטרים
+    lr         = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
+    dropout_p  = trial.suggest_float("dropout_p", 0.2, 0.6, step=0.1)
+    weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-3, log=True)
+    stat_dim   = trial.suggest_categorical("stat_dim", [32, 64, 128])
+    comb_dim   = trial.suggest_categorical("comb_dim", [64, 128, 256])
+    specaug_freq = trial.suggest_int("specaug_freq", 10, 30)
+    specaug_time = trial.suggest_int("specaug_time", 20, 60)
+    specaug_f_masks = trial.suggest_int("specaug_f_masks", 1, 2)
+    specaug_t_masks = trial.suggest_int("specaug_t_masks", 1, 2)
+    
+    print(f"Params: lr={lr:.1e}, dropout={dropout_p}, wd={weight_decay:.1e}, stat_dim={stat_dim}, comb_dim={comb_dim}")
+    
+    # עדכון טרנספורמציות האימון לפי הפרמטרים
+    current_train_transforms = transforms.Compose([
+        SpecAugment(freq_mask_param=specaug_freq, time_mask_param=specaug_time,
+                    num_freq_masks=specaug_f_masks, num_time_masks=specaug_t_masks),
+        transforms.Normalize(mean=imagenet_mean, std=imagenet_std)
+    ])
+    
+    # שימוש ב-GroupKFold (מניעת Data Leakage לפי קובץ)
+    gkf = GroupKFold(n_splits=N_SPLITS)
+    fold_val_accs = []
+    fold_recalls  = []
+    fold_best_models = []
+    
+    for fold, (train_idx, val_idx) in enumerate(gkf.split(orig_specs, orig_labels, groups=orig_groups)):
+        print(f"  Fold {fold+1}/{N_SPLITS}")
+        # חלוקת נתונים לפי אינדקסים
+        X_spec_train = orig_specs[train_idx]
+        X_stat_train = orig_stat_feats[train_idx]
+        y_train      = orig_labels[train_idx]
+        X_spec_val   = orig_specs[val_idx]
+        X_stat_val   = orig_stat_feats[val_idx]
+        y_val        = orig_labels[val_idx]
+        
+        # נרמול התכונות הסטטיסטיות
+        scaler = StandardScaler()
+        X_stat_train = scaler.fit_transform(X_stat_train)
+        X_stat_val   = scaler.transform(X_stat_val)
+        
+        # יצירת דאטהסטים
+        train_dataset = HybridDataset(X_spec_train, X_stat_train, y_train, transform=current_train_transforms)
+        val_dataset   = HybridDataset(X_spec_val, X_stat_val, y_val, transform=val_transforms)
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
+        val_loader   = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+        
+        # הגדרת המודל
+        model = HybridGeoModel(dropout_p=dropout_p, stat_feature_dim=stat_dim, combined_dim=comb_dim).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=lr, weight_decay=weight_decay)
+        
+        best_val_acc = 0.0
+        best_val_loss = float('inf')
+        best_model_state = None
+        epochs_no_improve = 0
+        history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
+        for epoch in range(1, EPOCHS+1):
+            train_loss, train_acc = train_epoch_hybrid(model, train_loader, criterion, optimizer, device)
+            val_loss, val_acc, val_labels, val_preds = evaluate_model_hybrid(model, val_loader, criterion, device)
+            history['train_loss'].append(train_loss)
+            history['train_acc'].append(train_acc)
+            history['val_loss'].append(val_loss)
+            history['val_acc'].append(val_acc)
+            print(f"    Epoch {epoch}: Train Acc={train_acc:.4f}, Val Acc={val_acc:.4f}")
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_val_acc = val_acc
+                best_model_state = deepcopy(model.state_dict())
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+            if epochs_no_improve >= PATIENCE:
+                print("    Early stopping")
+                break
+        fold_val_accs.append(best_val_acc)
+        
+        # הערכת המודל על דאטה חדש אם קיים
+        new_data_recall = 0.0
+        if new_specs.size > 0:
+            new_stat_scaled = scaler.transform(new_stat_feats)
+            new_dataset = HybridDataset(new_specs, new_stat_scaled, new_labels, transform=val_transforms)
+            new_loader = DataLoader(new_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+            _, _, new_true, new_pred = evaluate_model_hybrid(model, new_loader, criterion, device)
+            new_data_recall = recall_score(new_true, new_pred, average='macro', zero_division=0)
+            print(f"    New data recall: {new_data_recall:.4f}")
+        fold_recalls.append(new_data_recall)
+        fold_best_models.append({
+            'fold': fold+1,
+            'val_acc': best_val_acc,
+            'new_recall': new_data_recall,
+            'state_dict': best_model_state,
+            'history': history,
+            'scaler': scaler,
+            'val_labels': val_labels,
+            'val_preds': val_preds
+        })
+    avg_val_acc = np.mean(fold_val_accs)
+    avg_recall  = np.mean(fold_recalls)
+    combined_score = 0.3 * avg_val_acc + 0.7 * avg_recall
+    print(f"Trial {trial.number}: Avg Val Acc={avg_val_acc:.4f}, Avg New Recall={avg_recall:.4f}, Combined Score={combined_score:.4f}")
+    
+    trial.report(combined_score, step=0)
+    if trial.should_prune():
+        print("Trial pruned")
+        raise optuna.exceptions.TrialPruned()
+    
+    trial.set_user_attr("fold_models", fold_best_models)
+    return combined_score
+
+# --- 8. הרצת חיפוש היפר-פרמטרים עם Optuna ---
+try:
+    study.optimize(objective, timeout=TIMEOUT_SECONDS, callbacks=[save_study_callback], gc_after_trial=True, n_jobs=1)
+except KeyboardInterrupt:
+    print("Optimization interrupted.")
+    joblib.dump(study, STUDY_FILENAME)
+print("Optimization finished.")
+print("Number of finished trials:", len(study.trials))
+best_trial = study.best_trial
+print(f"Best trial: #{best_trial.number} with value: {best_trial.value:.4f}")
+
+# --- 9. שמירת Top N מודלים והצגת גרפים ---
+fold_models = best_trial.user_attrs.get("fold_models", [])
+if fold_models:
+    fold_models.sort(key=lambda x: x['new_recall'], reverse=True)
+    num_to_save = min(TOP_N_MODELS, len(fold_models))
+    for i in range(num_to_save):
+        model_info = fold_models[i]
+        fold_num = model_info['fold']
+        recall_val = model_info['new_recall']
+        model_filename = os.path.join(SAVE_PATH_BASE, f"best_model_trial{best_trial.number}_fold{fold_num}_recall{recall_val:.4f}.pth")
+        torch.save({
+            'model_state_dict': model_info['state_dict'],
+            'fold': fold_num,
+            'val_acc': model_info['val_acc'],
+            'new_recall': model_info['new_recall'],
+            'params': best_trial.params,
+            'scaler': model_info['scaler']
+        }, model_filename)
+        print(f"Saved model for fold {fold_num} to {model_filename}")
+        plot_fold_results(f"Trial {best_trial.number} Fold {fold_num}", model_info['history'], model_info['val_labels'], model_info['val_preds'])
+else:
+    print("No fold models available from the best trial.")
+
+print("Script finished.")
+
+
+
+########################
+
+
+
+# =====================================================================================
+# === קוד מלא ומתוקן סופית v5: חיפוש היפרפרמטרים עם Optuna, MobileNetV3, STFT ===
+# === (כולל כל הפונקציות, K-Fold מבוסס-קבצים, סינון Val Acc, שמירת Top 5) ===
+# =====================================================================================
 
 # --- 1. ייבוא והגדרות ---
 print("--- Importing Libraries ---")
@@ -10,21 +545,13 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset 
 from torchvision import models, transforms
-# --- <<< ייבוא ספציפי ל-B0 (וגם אחרים אם רוצים גמישות) >>> ---
-from torchvision.models import (
-    efficientnet_b0, EfficientNet_B0_Weights,
-    efficientnet_b1, EfficientNet_B1_Weights,
-    efficientnet_b2, EfficientNet_B2_Weights,
-    efficientnet_b3, EfficientNet_B3_Weights,
-    # הוסף עוד אם צריך
-    efficientnet_b7, EfficientNet_B7_Weights,
-)
-# --- <<< סוף ייבוא מודלים >>> ---
-from sklearn.model_selection import StratifiedGroupKFold
-from sklearn.metrics import confusion_matrix, classification_report
-from scipy.signal import butter, filtfilt
+from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
+from sklearn.model_selection import GroupKFold # <<< GroupKFold
+from sklearn.preprocessing import StandardScaler # <<< StandardScaler
+from sklearn.metrics import precision_score, recall_score, confusion_matrix, accuracy_score, classification_report
+from scipy.signal import butter, filtfilt, spectrogram 
 import librosa
 import librosa.display
 import matplotlib.pyplot as plt
@@ -35,78 +562,48 @@ import time
 import random
 from copy import deepcopy
 import cv2
-import optuna
-import joblib
+import optuna 
+import joblib 
 import warnings
-import torchvision
-import traceback # For detailed error printing
+import heapq 
 
-warnings.filterwarnings("ignore", category=UserWarning)
-warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning) 
+warnings.filterwarnings("ignore", category=FutureWarning) 
 
 print(f"Torch version: {torch.__version__}")
 print(f"Torchvision version: {torchvision.__version__}")
 print(f"Optuna version: {optuna.__version__}")
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {DEVICE}")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
 # --- הגדרות גלובליות ---
+print("--- Global Settings ---")
 LABEL_MAN = 0; LABEL_CAR = 1; LABEL_NOISE = 2
 CLASS_NAMES = ["Steps", "Vehicle", "Noise"]; NUM_CLASSES = 3
-
-# פרמטרי עיבוד אות וספקטרוגרמה
 window_size = 2000; stride = 500; fs = 1000.0; max_channels = 39
-N_MELS = 128; N_FFT = 1024; HOP_LENGTH = window_size // 4
-IMG_HEIGHT_FINAL = 224; IMG_WIDTH_FINAL = 224
+N_FFT_STFT = 512; HOP_LENGTH_STFT = N_FFT_STFT // 4; N_FREQ_BINS = N_FFT_STFT // 2 + 1 
+IMG_HEIGHT_FINAL = 224; IMG_WIDTH_FINAL = 224 
 lowcut = 1.0; highcut = 100.0; order = 4
-print(f"Spectrogram Size (Target): ({IMG_HEIGHT_FINAL}, {IMG_WIDTH_FINAL})")
-print(f"Spectrogram Params: N_MELS={N_MELS}, N_FFT={N_FFT}, HOP_LENGTH={HOP_LENGTH}")
-
-# --- <<< הגדרות ספציפיות לריצת B0 >>> ---
-MODEL_NAME_OPT = 'efficientnet_b0' # <--- מוגדר ל-B0
-# --- <<< שנה את N_SPLITS_OPT ל-3 בהתאם למספר הקבוצות שלך! >>> ---
-N_SPLITS_OPT = 3  # <--- מומלץ לשנות ל-3 (בהתאם לאזהרה שקיבלת)
-EPOCHS_OPT = 35
-PATIENCE_OPT = 8
-BATCH_SIZE_OPT = 32
-TIMEOUT_SECONDS_OPT = 8 * 3600 # 8 שעות
-STUDY_NAME_OPT = f"geophone-{MODEL_NAME_OPT}-groupkfold-search-v1" # <--- שם ייחודי ל-B0
-STUDY_FILENAME = f"{STUDY_NAME_OPT}.pkl"
-SEED_OFFSET = 500
-
-# ספים להערכה על נתונים חדשים ושמירה מותנית
-MIN_VAL_ACC_THRESHOLD = 0.65
-MAX_VAL_ACC_THRESHOLD = 0.995
-SAVE_THRESHOLD_VAL = 0.80
-SAVE_THRESHOLD_NEW = 0.70
-
-# נתיבים (עם שם תיקייה ייחודי)
-ORIGINAL_DATA_PATHS = {
-    LABEL_MAN: {'path': 'man.csv'},
-    LABEL_CAR: {'path': 'car.csv', 'args': {'skiprows': 1}},
-    LABEL_NOISE: {'path': 'nothing.csv'}
-}
-NEW_DATA_FOLDER = 'newDataSET_csv'
-SAVE_PATH_BASE = f"./results_{STUDY_NAME_OPT}/" # <--- תיקיית תוצאות ייחודית
-BEST_MODEL_FILENAME = os.path.join(SAVE_PATH_BASE, f"BEST_MODEL_{STUDY_NAME_OPT}.pth")
-QUALIFIED_MODELS_DIR = os.path.join(SAVE_PATH_BASE, "qualified_models")
-os.makedirs(SAVE_PATH_BASE, exist_ok=True)
-os.makedirs(QUALIFIED_MODELS_DIR, exist_ok=True)
-print(f"MODEL: {MODEL_NAME_OPT}")
-print(f"Optuna study name: {STUDY_NAME_OPT}")
-print(f"Results base path: {SAVE_PATH_BASE}")
-print(f"Best model (Optuna objective) will be saved to: {BEST_MODEL_FILENAME}")
-print(f"Conditionally saved models (Val>{SAVE_THRESHOLD_VAL}, New>{SAVE_THRESHOLD_NEW}) saved to: {QUALIFIED_MODELS_DIR}")
-print(f"Using N_SPLITS_OPT = {N_SPLITS_OPT}. Make sure this matches your number of unique groups (files/sources).") # הדגשת ה-N_SPLITS
-
-# סטטיסטיקות נרמול
-imagenet_mean = [0.485, 0.456, 0.406]; imagenet_std = [0.229, 0.224, 0.225]
+N_SPLITS_OPT = 5; EPOCHS_OPT = 25; PATIENCE_OPT = 7; BATCH_SIZE_OPT = 32
+MODEL_NAME_OPT = 'mobilenet_v3_small' 
+TIMEOUT_SECONDS_OPT = 4 * 3600 
+STUDY_NAME_OPT = f"geophone-{MODEL_NAME_OPT}-hybrid-kfold-v1"; STUDY_FILENAME = f"{STUDY_NAME_OPT}.pkl" 
+TOP_N_MODELS = 5 
+MIN_VAL_ACC_THRESHOLD = 0.70; MAX_VAL_ACC_THRESHOLD = 0.995 
+ORIGINAL_DATA_PATHS = { LABEL_MAN: {'path': ['man.csv']}, LABEL_CAR: {'path': ['car.csv', 'car2.csv'], 'args': {'skiprows': 1}}, LABEL_NOISE: {'path': ['nothing.csv', 'nothing2.csv']} }
+NEW_DATA_FOLDER = 'normalized_csv'; NEW_DATA_FILE_PATTERN = '*.csv'
+SAVE_PATH_BASE = f"./saved_models_{MODEL_NAME_OPT}_hybrid_kfold/" 
+os.makedirs(SAVE_PATH_BASE, exist_ok=True) 
+print(f"Window Size: {window_size} ({window_size/fs:.1f}s), Stride: {stride}")
+print(f"STFT settings: n_fft={N_FFT_STFT}, hop_length={HOP_LENGTH_STFT}")
+print(f"Target Image Size: ({IMG_HEIGHT_FINAL}, {IMG_WIDTH_FINAL})")
+print(f"Saving models to: {SAVE_PATH_BASE}")
 
 
 # --- 2. פונקציות עזר ועיבוד נתונים ---
-print("\n--- Defining Helper Functions ---")
+print("\n--- Defining Helper Functions & Feature Extraction ---")
 
-def pad_channels(data, target_channels=max_channels):
+def pad_channels(data, target_channels): 
     if data.ndim == 1: data = data.reshape(-1, 1)
     if data.shape[1] == target_channels: return data
     elif data.shape[1] < target_channels:
@@ -114,425 +611,306 @@ def pad_channels(data, target_channels=max_channels):
         return np.hstack((data, padding))
     else: return data[:, :target_channels]
 
-def create_windows(signal, label, window_size=window_size, stride=stride):
+def create_windows(signal, label, window_size=window_size, stride=stride): 
     X_windows, y_labels = [], []
     if signal.shape[0] < window_size: return [], []
     for start in range(0, signal.shape[0] - window_size + 1, stride):
-        X_windows.append(signal[start : start + window_size, :]); y_labels.append(label)
+        X_windows.append(signal[start : start + window_size, :])
+        y_labels.append(label)
     return X_windows, y_labels
 
-def create_mel_spectrogram(window_1d, sr=int(fs), n_fft=N_FFT, hop_length=HOP_LENGTH, n_mels=N_MELS, fmin=lowcut, fmax=highcut):
+def add_gaussian_noise_signal(signal_1d, noise_level=0.01):
+    noise = np.random.normal(0, noise_level, signal_1d.shape)
+    return (signal_1d + noise).astype(np.float32)
+
+def time_stretch_signal(signal_1d, stretch_rate=1.0, target_len=window_size):
+    try: 
+        stretched = librosa.effects.time_stretch(signal_1d.astype(np.float32), rate=stretch_rate)
+        current_len = len(stretched)
+        if current_len == target_len: return stretched
+        elif current_len > target_len: start = random.randint(0, current_len - target_len); return stretched[start : start + target_len]
+        else: pad_len = target_len - current_len; pad_start = random.randint(0, pad_len); padded = np.zeros(target_len, dtype=np.float32); padded[pad_start : pad_start + current_len] = stretched; return padded
+    except Exception: return signal_1d.astype(np.float32) 
+
+def create_stft_spectrogram(window_1d, sr=int(fs), n_fft=N_FFT_STFT, hop_length=HOP_LENGTH_STFT): 
     try:
         signal = window_1d.astype(np.float32)
-        if np.all(signal == signal[0]): return None
-        effective_fmax = min(fmax, sr / 2 - 1)
-        if effective_fmax <= fmin: effective_fmax = fmin + 10
-        mel_spec = librosa.feature.melspectrogram(y=signal, sr=sr, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels, fmin=fmin, fmax=effective_fmax)
-        mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
-        min_db, max_db = mel_spec_db.min(), mel_spec_db.max()
-        if max_db <= min_db: return None
-        mel_spec_norm = (mel_spec_db - min_db) / (max_db - min_db) if max_db > min_db else np.zeros_like(mel_spec_db)
-        if not np.isfinite(mel_spec_norm).all(): return None
-        return mel_spec_norm.astype(np.float32)
-    except Exception as e:
-        # print(f"Debug Error in create_mel_spectrogram: {e}") # Uncomment for debugging if needed
-        return None
+        f, t, Sxx = spectrogram(signal, fs=sr, nperseg=n_fft, noverlap=n_fft - hop_length, nfft=n_fft, detrend=False, scaling='spectrum') 
+        freq_slice = np.where(f <= highcut * 1.1)[0]; If len(freq_slice) == 0: return np.zeros((10, 10), dtype=np.float32) 
+        f = f[freq_slice]; Sxx = Sxx[freq_slice, :]
+        if Sxx.size == 0: return np.zeros((len(f), 10), dtype=np.float32) 
+        Sxx_db = 10 * np.log10(Sxx + 1e-9); min_db, max_db = np.percentile(Sxx_db, 5), np.percentile(Sxx_db, 95)
+        if max_db <= min_db: max_db = min_db + 1e-6 
+        spec_norm = np.clip((Sxx_db - min_db) / (max_db - min_db), 0, 1) 
+        return spec_norm.astype(np.float32) 
+    except Exception: return np.zeros((N_FREQ_BINS // 2, 10), dtype=np.float32) 
 
-# --- <<< פונקציית טעינת נתונים מלאה ומתוקנת >>> ---
-# (זו הפונקציה שהייתה בקוד הקודם, עם התיקון לשגיאת TypeError)
-def load_data_specs_signals_and_groups(file_map, target_img_size=(IMG_HEIGHT_FINAL, IMG_WIDTH_FINAL)):
-    all_specs, all_labels, all_groups = [], [], [] # הוסר all_signals
+def extract_statistical_features(window_1d, sr=int(fs)):
+    features = []; num_expected_features = 8 + 13 
+    try:
+        features.append(np.mean(window_1d)); features.append(np.std(window_1d)); features.append(np.sqrt(np.mean(window_1d**2))) 
+        features.append(librosa.feature.zero_crossing_rate(y=window_1d).mean())
+        stft_result = librosa.stft(window_1d.astype(np.float32), n_fft=N_FFT_STFT, hop_length=HOP_LENGTH_STFT)
+        spec_mag = np.abs(stft_result)
+        features.append(librosa.feature.spectral_centroid(S=spec_mag, sr=sr).mean())
+        features.append(librosa.feature.spectral_bandwidth(S=spec_mag, sr=sr).mean())
+        features.append(librosa.feature.spectral_rolloff(S=spec_mag, sr=sr, roll_percent=0.85).mean())
+        features.append(librosa.feature.spectral_flatness(S=spec_mag).mean())
+        mfccs = librosa.feature.mfcc(y=window_1d.astype(np.float32), sr=sr, n_mfcc=13)
+        features.extend(np.mean(mfccs, axis=1)) 
+        if len(features) != num_expected_features: raise ValueError("Incorrect feature count")
+    except Exception as e: return np.zeros(num_expected_features, dtype=np.float32)
+    return np.array(features, dtype=np.float32)
+
+NUM_STAT_FEATURES = 8 + 13; print(f"Number of statistical features: {NUM_STAT_FEATURES}")
+
+def load_data_hybrid_by_file(file_map, target_img_size=(IMG_HEIGHT_FINAL, IMG_WIDTH_FINAL)):
+    all_specs, all_stat_features, all_labels, all_groups = [], [], [], []
     try: b, a = butter(order, [lowcut/(fs/2), highcut/(fs/2)], btype='band')
-    except ValueError as e: print(f"CRITICAL FILTER ERROR: {e}. Aborting."); return [], [], [], []
-    print(f"Loading data, specs, and groups...")
-    items_created_count = 0; processed_files = 0; group_counter = 0
-    # לולאה על התוויות והמידע במילון הקלט
+    except ValueError as e: print(f"Filter error: {e}"); return [], [], [], []
+    print(f"Loading data by file & creating hybrid features...")
+    group_counter = 0 
     for label, info in file_map.items():
-        filepaths = info.get('path', []) # קבל את הנתיב/רשימת הנתיבים
-        extra_args = info.get('args', {}) # קבל ארגומנטים נוספים
-
-        # ודא ש-filepaths היא תמיד רשימה
-        if isinstance(filepaths, str):
-            filepaths = [filepaths]
-        if not isinstance(filepaths, list):
-            print(f"  WARNING: Expected 'path' for label {label} to be a string or list, got {type(filepaths)}. Skipping label.")
-            continue
-        if not filepaths:
-             print(f"  No file paths provided for label {label}. Skipping.")
-             continue
-
-        print(f"\nProcessing Label {label} ({CLASS_NAMES[label] if label < len(CLASS_NAMES) else 'Unknown'}) ({len(filepaths)} files)...")
-
-        # <<< --- לולאה פנימית על כל נתיב ברשימה --- >>>
+        filepaths = info['path']; extra_args = info.get('args', {})
+        if isinstance(filepaths, str): filepaths = [filepaths]
         for filepath in filepaths:
-            # --- >>> התיקון שהתווסף: בדיקת סוג המשתנה filepath <<< ---
-            if not isinstance(filepath, (str, bytes, os.PathLike)):
-                print(f"\n  ERROR in load_data: Expected filepath inside list to be a string/path, but got {type(filepath)}: {filepath}. Skipping this entry.")
-                continue # דלג על הערך הלא תקין ברשימה
-            # --- >>> סוף התיקון <<< ---
-
-            # הדפסת שם הקובץ הנוכחי
-            print(f"  Processing file: {os.path.basename(filepath)} (Group ID: {group_counter})...", end='')
-
-            # בדיקה אם הקובץ קיים (אחרי וידוא ש-filepath הוא מסוג תקין)
-            if not os.path.exists(filepath):
-                print(f" ERROR: File not found! Skipping.")
-                # אין צורך לקדם group_counter כאן, כי אנחנו בתוך לולאת הקבצים של אותה תווית
-                continue # דלג על הקובץ הספציפי הזה
-
-            # המשך עיבוד הקובץ
-            df = None; data = None; windows_created_count = 0
+            file_specs, file_stats, file_labels = [], [], [] 
             try:
-                try: df = pd.read_csv(filepath, header=None, skipinitialspace=True, **extra_args)
-                except Exception:
-                     try: df = pd.read_csv(filepath, header=None, skiprows=1, skipinitialspace=True, **extra_args)
-                     except Exception as e_read: print(f" ERROR reading CSV {filepath}: {e_read}. Skipping file."); continue
-                if df is None or df.empty: print(" Empty file/read failed. Skipping file."); continue
-                df = df.dropna();
-                if df.empty: print(" Empty after dropna. Skipping file."); continue;
-                try:
-                   data = df.values
-                   if not np.issubdtype(data.dtype, np.number): data = data.astype(float)
-                except ValueError as e_type: print(f" ERROR converting to numeric: {e_type}. Skipping file."); continue
-                if data.shape[0] < window_size or data.ndim < 2 or data.shape[1] == 0: print(f" Insufficient data shape {data.shape}. Skipping file."); continue
-                data_padded = pad_channels(data)
-                try: filtered_data = filtfilt(b, a, data_padded, axis=0)
-                except Exception as e_filter: print(f" ERROR filtering data: {e_filter}. Skipping file."); continue
-                windows, labels_w = create_windows(filtered_data, label)
-                if not windows: print(" No windows created. Skipping file."); continue
-                windows_created_count = len(windows); window_processed_count = 0
+                try: df = pd.read_csv(filepath, header=None, **extra_args)
+                except: df = pd.read_csv(filepath, header=None, skiprows=1, **extra_args)
+                df = df.dropna(); data = df.values; If not np.issubdtype(data.dtype, np.number): data = data.astype(float)
+                if data.shape[0] < window_size or data.ndim < 2 or data.shape[1] == 0: continue
+                data_padded = pad_channels(data, max_channels); windows, labels = create_windows(data_padded, label); If not windows: continue
                 for i, w in enumerate(windows):
                     try:
-                        signal_to_process = w[:, 0].astype(np.float32)
-                        mel_spec_norm = create_mel_spectrogram(signal_to_process)
-                        if mel_spec_norm is None: continue
-                        resized_spec = cv2.resize(mel_spec_norm, (target_img_size[1], target_img_size[0]), interpolation=cv2.INTER_LINEAR)
-                        spec_3_channels = np.stack([resized_spec]*3, axis=0)
-                        if not np.isfinite(spec_3_channels).all(): continue
-                        all_specs.append(spec_3_channels); all_labels.append(labels_w[i]); all_groups.append(group_counter) # Use current group_counter
-                        items_created_count += 1; window_processed_count += 1
-                    except Exception as e_window: pass
-                print(f" -> Processed {window_processed_count}/{windows_created_count} windows.")
-            except Exception as e_file: print(f" UNEXPECTED ERROR processing file {filepath}: {e_file}"); traceback.print_exc()
-        # --- סוף הלולאה הפנימית ---
+                        filtered_w = filtfilt(b, a, w, axis=0); signal_to_process = filtered_w[:, 0] 
+                        spec_norm = create_stft_spectrogram(signal_to_process); 
+                        if spec_norm is None or spec_norm.shape[0] < 5 or spec_norm.shape[1] < 5: continue 
+                        resized_spec = cv2.resize(spec_norm, (target_img_size[1], target_img_size[0]), interpolation=cv2.INTER_LINEAR)
+                        spec_3_channels = np.stack([resized_spec]*3, axis=0); 
+                        stat_features = extract_statistical_features(signal_to_process)
+                        if stat_features is None or len(stat_features) != NUM_STAT_FEATURES or not np.isfinite(spec_3_channels).all() or not np.isfinite(stat_features).all(): continue
+                        file_specs.append(spec_3_channels); file_stats.append(stat_features); file_labels.append(labels[i])
+                    except Exception: pass 
+                if file_specs:
+                    all_specs.extend(file_specs); all_stat_features.extend(file_stats); all_labels.extend(file_labels)
+                    all_groups.extend([group_counter] * len(file_specs)) 
+                    group_counter += 1
+            except Exception as e: print(f"  Error loading/processing file {filepath}: {e}")
+            
+    print(f"Total items created: {len(all_specs)}")
+    if not all_specs: return np.array([]), np.array([]), np.array([]), np.array([]); 
+    return np.array(all_specs, dtype=np.float32), np.array(all_stat_features, dtype=np.float32), np.array(all_labels, dtype=np.int64), np.array(all_groups, dtype=np.int64)
 
-        # קדם את מונה הקבוצות אחרי שכל הקבצים *עבור התווית הנוכחית* עובדו
-        group_counter += 1
+# --- טעינת הנתונים ---
+print("\n--- Loading All Data with Group Info ---")
+all_specs_np, all_stat_features_np, all_labels_np, all_groups_np = load_data_hybrid_by_file(ORIGINAL_DATA_PATHS) 
+new_external_files = glob.glob(os.path.join(NEW_DATA_FOLDER, NEW_DATA_FILE_PATTERN))
+new_external_file_map = {LABEL_MAN: {'path': new_external_files}} if new_external_files else {}
+new_specs_np, new_stat_features_np, new_labels_np, _ = load_data_hybrid_by_file(new_external_file_map) if new_external_files else (np.array([]), np.array([]), np.array([]), np.array([]))
+if all_specs_np.size == 0: print("CRITICAL ERROR: Failed to load original/extended data."); exit()
+print("Original Spectrogram data shape:", all_specs_np.shape)
+print("Original Stat Features shape:", all_stat_features_np.shape)
+print("Original Labels shape:", all_labels_np.shape)
+print("Original Groups shape:", all_groups_np.shape)
+if new_specs_np.size > 0: print("New External Spectrogram data shape:", new_specs_np.shape); print("New External Stat Features shape:", new_stat_features_np.shape)
+else: print("Warning: Failed to load new external dataset.")
 
-    # --- סוף הלולאה החיצונית ---
-    print(f"\nFinished loading all labels. Total items created: {items_created_count}")
-    if not all_specs: print("WARNING: No spectrogram items were created successfully.")
-    specs_np = np.array(all_specs, dtype=np.float32) if all_specs else np.array([]); labels_np = np.array(all_labels, dtype=np.int64) if all_labels else np.array([], dtype=np.int64); groups_np = np.array(all_groups, dtype=np.int64) if all_groups else np.array([], dtype=np.int64)
-    del all_specs, all_labels, all_groups # Free memory
-    # מחזירים None במקום all_signals כי לא השתמשנו בו בהמשך
-    return specs_np, labels_np, None, groups_np
-# --- <<< סוף פונקציית טעינת נתונים >>> ---
-
-
-# --- <<< פונקציית אוגמנטציה מתוקנת >>> ---
-class SpecAugment(nn.Module):
-    def __init__(self, freq_mask_param=20, time_mask_param=40, num_freq_masks=1, num_time_masks=1):
-        super().__init__(); self.freq_mask_param = freq_mask_param; self.time_mask_param = time_mask_param
-        self.num_freq_masks = num_freq_masks; self.num_time_masks = num_time_masks
-    def forward(self, spec):
+# --- 3. הגדרת טרנספורמציות, Dataset, מודל, פונקציות ---
+print("\n--- Defining Transforms, Dataset, Model, Train/Eval Functions, Plotting ---")
+imagenet_mean = [0.485, 0.456, 0.406]; imagenet_std = [0.229, 0.224, 0.225]; print("ImageNet normalization stats defined.")
+class SpecAugment(nn.Module): 
+    def __init__(self, freq_mask_param=20, time_mask_param=40, num_freq_masks=1, num_time_masks=1): super().__init__(); self.freq_mask_param = freq_mask_param; self.time_mask_param = time_mask_param; self.num_freq_masks = num_freq_masks; self.num_time_masks = num_time_masks
+    def forward(self, spec): 
         if not isinstance(spec, torch.Tensor): raise TypeError("Input must be a Tensor.")
-        if spec.ndim != 3: print(f"ERROR in SpecAugment: Expected 3D tensor (C, H, W), got {spec.ndim}D shape {spec.shape}. Skipping."); return spec
-        spec_aug = spec.clone(); C, H, W = spec_aug.shape
-        if H <= 0 or W <= 0: print(f"Warning in SpecAugment: Input has zero size dimension ({spec.shape}). Skipping."); return spec
-        fm_param = min(self.freq_mask_param, H // 2); tm_param = min(self.time_mask_param, W // 2)
-        mask_value = spec.mean()
-        # Frequency masking (on H dim)
+        spec_aug = spec.clone(); _, F, T = spec_aug.shape; fm_param = min(self.freq_mask_param, F // 2); tm_param = min(self.time_mask_param, T // 2)
         for _ in range(self.num_freq_masks):
-            if fm_param > 0: f = random.randrange(0, fm_param + 1);
-            if H >= f and f > 0: f0 = random.randrange(0, H - f + 1); spec_aug[:, f0 : f0 + f, :] = mask_value
-        # Time masking (on W dim)
+            if fm_param > 0: f = random.randrange(0, fm_param); f0 = random.randrange(0, F - f); spec_aug[:, f0:f0+f, :] = spec.mean()
         for _ in range(self.num_time_masks):
-             if tm_param > 0: t = random.randrange(0, tm_param + 1);
-             if W >= t and t > 0: t0 = random.randrange(0, W - t + 1); spec_aug[:, :, t0 : t0 + t] = mask_value
+             if tm_param > 0: t = random.randrange(0, tm_param); t0 = random.randrange(0, T - t); spec_aug[:, :, t0:t0+t] = spec.mean()
         return spec_aug
-# --- <<< סוף אוגמנטציה >>> ---
-
-val_test_transforms = transforms.Compose([ transforms.Normalize(mean=imagenet_mean, std=imagenet_std) ])
-print("Evaluation transforms defined.")
-
-class SpectrogramDataset(Dataset):
-    def __init__(self, specs_np, labels_np, transform=None):
-        self.specs = torch.from_numpy(specs_np.astype(np.float32)); self.labels = torch.from_numpy(labels_np.astype(np.int64)); self.transform = transform
+train_transforms = transforms.Compose([ SpecAugment(), transforms.Normalize(mean=imagenet_mean, std=imagenet_std) ])
+val_test_transforms = transforms.Compose([ transforms.Normalize(mean=imagenet_mean, std=imagenet_std) ]); print("Transforms defined.")
+class HybridDataset(Dataset): 
+    def __init__(self, specs_np_or_tensor, stat_features_np_or_tensor, labels_np_or_tensor, spec_transform=None):
+        # קבל גם טנזורים וגם מערכים
+        self.specs = specs_np_or_tensor if torch.is_tensor(specs_np_or_tensor) else torch.from_numpy(specs_np_or_tensor).float()
+        self.stat_features = stat_features_np_or_tensor if torch.is_tensor(stat_features_np_or_tensor) else torch.from_numpy(stat_features_np_or_tensor).float()
+        self.labels = labels_np_or_tensor if torch.is_tensor(labels_np_or_tensor) else torch.from_numpy(labels_np_or_tensor).long()
+        self.spec_transform = spec_transform
     def __len__(self): return len(self.labels)
-    def __getitem__(self, idx):
-        spec = self.specs[idx]; label = self.labels[idx]
-        if self.transform: spec = self.transform(spec)
-        return spec, label
-
-# --- <<< פונקציית יצירת מודל גמישה >>> ---
-def setup_efficientnet_model(model_name='efficientnet_b0', pretrained=True, num_classes=NUM_CLASSES, dropout_p=0.2):
-    model_arch = None; weights = None
-    print(f"Setting up {model_name}...") # Print model name being set up
-    if model_name == 'efficientnet_b0': weights = EfficientNet_B0_Weights.DEFAULT if pretrained else None; model_arch = efficientnet_b0(weights=weights)
-    elif model_name == 'efficientnet_b1': weights = EfficientNet_B1_Weights.DEFAULT if pretrained else None; model_arch = efficientnet_b1(weights=weights)
-    elif model_name == 'efficientnet_b2': weights = EfficientNet_B2_Weights.DEFAULT if pretrained else None; model_arch = efficientnet_b2(weights=weights)
-    elif model_name == 'efficientnet_b3': weights = EfficientNet_B3_Weights.DEFAULT if pretrained else None; model_arch = efficientnet_b3(weights=weights)
-    elif model_name == 'efficientnet_b7': weights = EfficientNet_B7_Weights.DEFAULT if pretrained else None; model_arch = efficientnet_b7(weights=weights)
-    else: raise ValueError(f"Unsupported model name: {model_name}.")
-    print(f"  Using weights: {weights}")
-
-    if hasattr(model_arch, 'classifier') and isinstance(model_arch.classifier, nn.Sequential) and len(model_arch.classifier) > 0 and isinstance(model_arch.classifier[-1], nn.Linear):
-        num_ftrs = model_arch.classifier[-1].in_features
-        dropout_layer_exists = isinstance(model_arch.classifier[0], nn.Dropout)
-        if dropout_layer_exists: model_arch.classifier[0].p = dropout_p; model_arch.classifier[-1] = nn.Linear(num_ftrs, num_classes)
-        else: model_arch.classifier = nn.Sequential( nn.Dropout(p=dropout_p, inplace=True), nn.Linear(num_ftrs, num_classes) ); print("  Added new Dropout + Linear classifier.")
-    else: raise AttributeError(f"Could not automatically modify classifier for {model_name}.")
-
-    if pretrained and weights is not None:
-        if hasattr(model_arch, 'features'): print("  Freezing 'features' layers."); [p.requires_grad_(False) for p in model_arch.features.parameters()] # More concise freeze
-        print("  Ensuring classifier layers are trainable.");
-        if hasattr(model_arch, 'classifier'): [p.requires_grad_(True) for p in model_arch.classifier.parameters()] # More concise unfreeze
-
-    model_arch = model_arch.to(DEVICE); return model_arch
-# --- <<< סוף פונקציית יצירת מודל >>> ---
-
-def train_epoch_effnet(model, dataloader, criterion, optimizer, device):
-    model.train(); running_loss = 0.0; correct_preds = 0; total_samples = 0;
-    for inputs, labels in dataloader:
+    def __getitem__(self, idx): spec = self.specs[idx]; stat_feat = self.stat_features[idx]; label = self.labels[idx];  if self.spec_transform: spec = self.spec_transform(spec); return spec, stat_feat, label 
+print("Hybrid Dataset defined.")
+class HybridGeoModel(nn.Module):
+    def __init__(self, model_name='mobilenet_v3_small', pretrained=True, num_classes=NUM_CLASSES, num_stat_features=NUM_STAT_FEATURES, dropout_p=0.4, stat_feature_dim=64, combined_dim=128):
+        super().__init__()
+        if model_name == 'mobilenet_v3_small': weights = MobileNet_V3_Small_Weights.DEFAULT if pretrained else None; self.cnn_backbone = mobilenet_v3_small(weights=weights); cnn_out_features = self.cnn_backbone.classifier[3].in_features; self.cnn_backbone.classifier = nn.Identity() 
+        else: raise ValueError("Unsupported model")
+        if pretrained: 
+            for param in self.cnn_backbone.features.parameters(): param.requires_grad = False
+        self.stat_mlp = nn.Sequential(nn.LayerNorm(num_stat_features), nn.Linear(num_stat_features, stat_feature_dim * 2), nn.ReLU(), nn.Dropout(dropout_p), nn.Linear(stat_feature_dim * 2, stat_feature_dim), nn.ReLU())
+        self.dropout = nn.Dropout(p=dropout_p); self.fc_combined = nn.Linear(cnn_out_features + stat_feature_dim, combined_dim); self.fc_output = nn.Linear(combined_dim, num_classes)
+    def forward(self, spec_input, stat_input):
+        cnn_features = self.cnn_backbone(spec_input); stat_features = self.stat_mlp(stat_input); combined = torch.cat((cnn_features, stat_features), dim=1)
+        x = self.dropout(combined); x = F.relu(self.fc_combined(x)); x = self.dropout(x); output = self.fc_output(x); return output
+print("Hybrid Model defined.")
+def train_epoch_hybrid(model, dataloader, criterion, optimizer, device): 
+    model.train(); running_loss = 0.0; correct_preds = 0; total_samples = 0; batch_num = 0
+    for specs, stats, labels in dataloader: 
+        batch_num += 1; preds = None 
         try:
-            inputs, labels = inputs.to(device), labels.to(device); optimizer.zero_grad(); outputs = model(inputs); loss = criterion(outputs, labels)
-            if loss is None or torch.isnan(loss): print("  Warning: NaN/None loss in train. Skipping batch."); continue
-            preds = outputs.max(1)[1]; loss.backward(); optimizer.step()
-            running_loss += loss.item() * inputs.size(0); correct_preds += (preds == labels).sum().item(); total_samples += labels.size(0)
-        except Exception as e: print(f"  Error train batch: {e}"); traceback.print_exc(); continue
-    if total_samples == 0: print("Warning: 0 samples processed in train epoch."); return 0.0, 0.0;
-    return running_loss / total_samples, correct_preds / total_samples
-
-def evaluate_model_effnet(model, dataloader, criterion, device):
+            specs, stats, labels = specs.to(device), stats.to(device), labels.to(device); optimizer.zero_grad(); outputs = model(specs, stats); loss = criterion(outputs, labels)
+            if loss is None or torch.isnan(loss): continue 
+            preds = outputs.max(1)[1]; loss.backward(); optimizer.step() 
+            running_loss += loss.item() * specs.size(0); total_samples += labels.size(0)
+            if preds is not None: correct_preds += (preds == labels).sum().item() 
+        except Exception as e: print(f"  Error (train batch {batch_num}): {e}"); continue 
+    if total_samples == 0: return 0.0, 0.0; return running_loss / total_samples, correct_preds / total_samples
+def evaluate_model_hybrid(model, dataloader, criterion, device): 
     model.eval(); running_loss = 0.0; correct_preds = 0; total_samples = 0; all_preds = []; all_labels = []
     with torch.no_grad():
-        for inputs, labels in dataloader:
+        batch_num = 0
+        for specs, stats, labels in dataloader: 
+            batch_num += 1; preds = None 
             try:
-                inputs, labels = inputs.to(device), labels.to(device); outputs = model(inputs); loss = criterion(outputs, labels);
-                if loss is None or torch.isnan(loss): print("  Warning: NaN/None loss in eval. Skipping batch."); continue
-                preds = outputs.max(1)[1]
-                running_loss += loss.item() * inputs.size(0); correct_preds += (preds == labels).sum().item(); total_samples += labels.size(0)
-                all_preds.extend(preds.cpu().numpy()); all_labels.extend(labels.cpu().numpy())
-            except Exception as e: print(f"  Error eval batch: {e}"); traceback.print_exc(); continue
-    if total_samples == 0: print("Warning: 0 samples processed in eval."); return 0.0, 0.0, [], [];
-    return running_loss / total_samples, correct_preds / total_samples, all_labels, all_preds
+                specs, stats, labels = specs.to(device), stats.to(device), labels.to(device); outputs = model(specs, stats); loss = criterion(outputs, labels); 
+                if loss is None or torch.isnan(loss): continue
+                preds = outputs.max(1)[1] 
+                running_loss += loss.item() * specs.size(0); total_samples += labels.size(0)
+                if preds is not None: all_preds.extend(preds.cpu().numpy()); all_labels.extend(labels.cpu().numpy()); correct_preds += (preds == labels).sum().item() 
+            except Exception as e: print(f"  Error (eval batch {batch_num}): {e}"); continue 
+    if total_samples == 0: return 0.0, 0.0, [], []; return running_loss / total_samples, correct_preds / total_samples, all_labels, all_preds 
+print("Hybrid Train/Eval functions defined.")
+def plot_final_results(title_prefix, history, test_labels, test_preds, new_data_labels=None, new_data_preds=None, new_data_recall=None, class_names=CLASS_NAMES):
+    print(f"\n--- Results for {title_prefix} ---"); epochs_ran = len(history['val_loss']); epochs_range = range(1, epochs_ran + 1)
+    if epochs_ran > 0: plt.figure(figsize=(12, 5)); plt.suptitle(f'{title_prefix} Training History', fontsize=14); plt.subplot(1, 2, 1); plt.plot(epochs_range, history['train_loss'], 'o-', label='Train Loss'); plt.plot(epochs_range, history['val_loss'], 'o-', label='Val Loss'); plt.xlabel('Epochs'); plt.ylabel('Loss'); plt.legend(); plt.grid(True); plt.title('Loss vs. Epochs'); plt.subplot(1, 2, 2); plt.plot(epochs_range, history['train_acc'], 'o-', label='Train Acc'); plt.plot(epochs_range, history['val_acc'], 'o-', label='Val Acc'); plt.xlabel('Epochs'); plt.ylabel('Accuracy'); plt.legend(); plt.grid(True); plt.title('Accuracy vs. Epochs'); plt.ylim(0, 1.05); plt.tight_layout(rect=[0, 0.03, 1, 0.93]); plt.show(block=False); plt.pause(0.1)
+    if test_labels is not None and test_preds is not None and len(test_labels) > 0 and len(test_preds) > 0: print("\nTest Set Performance (from Extended Original Data):"); cm_test = confusion_matrix(test_labels, test_preds, labels=range(NUM_CLASSES)); report_test = classification_report(test_labels, test_preds, target_names=class_names, labels=range(NUM_CLASSES), zero_division=0); print("CM (Test):"); print(cm_test); print("\nReport (Test):"); print(report_test); plt.figure(figsize=(6, 5)); sns.heatmap(cm_test, annot=True, fmt='d', cmap='Greens', xticklabels=class_names, yticklabels=class_names); plt.title(f'{title_prefix} - Test Set CM'); plt.xlabel('Predicted'); plt.ylabel('True'); plt.show(block=False); plt.pause(0.1)
+    if new_data_labels is not None and new_data_preds is not None and len(new_data_labels) > 0 and len(new_data_preds) > 0: print("\nNew External Dataset Performance:"); cm_new = confusion_matrix(new_data_labels, new_data_preds, labels=range(NUM_CLASSES)); report_new = classification_report(new_data_labels, new_data_preds, target_names=class_names, labels=range(NUM_CLASSES), zero_division=0); print(f"Overall Acc: {accuracy_score(new_data_labels, new_data_preds):.4f}"); print(f"'Steps' Recall: {new_data_recall:.4f}" if new_data_recall is not None else "N/A"); print("\nCM (New Data):"); print(cm_new); print("\nReport (New Data):"); print(report_new); plt.figure(figsize=(6, 5)); sns.heatmap(cm_new, annot=True, fmt='d', cmap='Purples', xticklabels=class_names, yticklabels=class_names); plt.title(f'{title_prefix} - New External Data CM'); plt.xlabel('Predicted'); plt.ylabel('True'); plt.show(block=False); plt.pause(0.1)
+print("Plotting function defined.")
 
-def plot_results_for_model(model_id, history, val_metrics, new_data_metrics, class_names=CLASS_NAMES, save_dir=None):
-    print(f"\n--- Plotting Results for Model ID: {model_id} ---")
-    safe_model_id = "".join(c for c in str(model_id) if c.isalnum() or c in ('_', '-')).rstrip(); base_filename = f"model_{safe_model_id}"
-    plot_filename_train = os.path.join(save_dir, f"{base_filename}_training_history.png") if save_dir else None; epochs_ran = len(history.get('val_loss', []))
-    if epochs_ran > 0:
-        epochs_range = range(1, epochs_ran + 1); fig_train, axes_train = plt.subplots(1, 2, figsize=(15, 5)); fig_train.suptitle(f'Model {model_id} Training History', fontsize=14)
-        axes_train[0].plot(epochs_range, history.get('train_loss', []), 'o-', label='Train Loss'); axes_train[0].plot(epochs_range, history.get('val_loss', []), 'o-', label='Val Loss'); axes_train[0].set_xlabel('Epochs'); axes_train[0].set_ylabel('Loss'); axes_train[0].legend(); axes_train[0].grid(True); axes_train[0].set_title('Loss vs. Epochs')
-        axes_train[1].plot(epochs_range, history.get('train_acc', []), 'o-', label='Train Acc'); axes_train[1].plot(epochs_range, history.get('val_acc', []), 'o-', label='Val Acc'); axes_train[1].set_xlabel('Epochs'); axes_train[1].set_ylabel('Accuracy'); axes_train[1].legend(); axes_train[1].grid(True); axes_train[1].set_title('Accuracy vs. Epochs'); axes_train[1].set_ylim(0, 1.05)
-        plt.tight_layout(rect=[0, 0.03, 1, 0.93]);
-        if plot_filename_train: try: plt.savefig(plot_filename_train); print(f"  Saved training history: {plot_filename_train}") except Exception as e: print(f"  Error saving training plot: {e}")
-        plt.show(); plt.close(fig_train)
-    else: print("  No training history data to plot.")
-    if val_metrics and 'labels' in val_metrics and 'preds' in val_metrics and len(val_metrics['labels']) > 0:
-        print("\nValidation Set Performance (Leakage Free):");
-        try:
-            cm_val = confusion_matrix(val_metrics['labels'], val_metrics['preds'], labels=range(NUM_CLASSES)); report_val = classification_report(val_metrics['labels'], val_metrics['preds'], target_names=class_names, labels=range(NUM_CLASSES), zero_division=0); print("CM:\n", cm_val, "\nReport:\n", report_val)
-            plot_filename_cm_val = os.path.join(save_dir, f"{base_filename}_cm_validation.png") if save_dir else None; fig_cm_val, ax_cm_val = plt.subplots(figsize=(6, 5)); sns.heatmap(cm_val, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names, ax=ax_cm_val); ax_cm_val.set_title(f'Model {model_id} - Validation CM'); ax_cm_val.set_xlabel('Predicted'); ax_cm_val.set_ylabel('True'); plt.tight_layout()
-            if plot_filename_cm_val: try: plt.savefig(plot_filename_cm_val); print(f"  Saved validation CM: {plot_filename_cm_val}") except Exception as e: print(f"  Error saving validation CM plot: {e}")
-            plt.show(); plt.close(fig_cm_val)
-        except Exception as e: print(f"  Error plotting validation CM/Report: {e}"); traceback.print_exc()
-    else: print("\nNo validation results to plot (or empty results).")
-    if new_data_metrics and 'labels' in new_data_metrics and 'preds' in new_data_metrics and len(new_data_metrics['labels']) > 0:
-        print("\nTest Set Performance (Normalized Data):");
-        try:
-            cm_new = confusion_matrix(new_data_metrics['labels'], new_data_metrics['preds'], labels=range(NUM_CLASSES)); report_new = classification_report(new_data_metrics['labels'], new_data_metrics['preds'], target_names=class_names, labels=range(NUM_CLASSES), zero_division=0); print("CM:\n", cm_new, "\nReport:\n", report_new)
-            plot_filename_cm_new = os.path.join(save_dir, f"{base_filename}_cm_test_normalized.png") if save_dir else None; fig_cm_new, ax_cm_new = plt.subplots(figsize=(6, 5)); sns.heatmap(cm_new, annot=True, fmt='d', cmap='Oranges', xticklabels=class_names, yticklabels=class_names, ax=ax_cm_new); ax_cm_new.set_title(f'Model {model_id} - Test CM (Normalized)'); ax_cm_new.set_xlabel('Predicted'); ax_cm_new.set_ylabel('True'); plt.tight_layout()
-            if plot_filename_cm_new: try: plt.savefig(plot_filename_cm_new); print(f"  Saved test CM: {plot_filename_cm_new}") except Exception as e: print(f"  Error saving test CM plot: {e}")
-            plt.show(); plt.close(fig_cm_new)
-        except Exception as e: print(f"  Error plotting test CM/Report: {e}"); traceback.print_exc()
-    else: print("\nNo new data test results to plot (or empty results).")
-
-# --- 3. טעינת הנתונים ---
-print("\n--- Loading ALL Data (Original and New) Before Optuna Search ---")
-orig_specs_np, orig_labels_np, _, orig_groups_np = load_data_specs_signals_and_groups(ORIGINAL_DATA_PATHS)
-# --- טעינת נתונים חדשים (עם ההנחה שהם LABEL_MAN) ---
-new_data_files = glob.glob(os.path.join(NEW_DATA_FOLDER, '*.csv'))
-new_data_map = {LABEL_MAN: {'path': new_data_files}} if new_data_files else {}
-if new_data_files: print(f"Found {len(new_data_files)} files in {NEW_DATA_FOLDER}. Loading them (assuming Label {LABEL_MAN}).")
-else: print(f"No CSV files found in {NEW_DATA_FOLDER}")
-new_specs_np, new_labels_np, _, _ = load_data_specs_signals_and_groups(new_data_map)
-# --- סוף טעינת נתונים חדשים ---
-if orig_specs_np.size == 0 or orig_labels_np.size == 0 or orig_groups_np.size == 0: print("\nCRITICAL ERROR: Failed to load original data/groups. Cannot proceed."); exit(1)
-if new_specs_np.size == 0: print("\nWarning: No new data loaded. Evaluation on new data will be skipped.")
-print(f"\nOriginal data shapes: Specs={orig_specs_np.shape}, Labels={orig_labels_np.shape}, Groups={orig_groups_np.shape}")
-print(f"New data shapes: Specs={new_specs_np.shape}, Labels={new_labels_np.shape}")
-if orig_groups_np.size > 0: print(f"Number of unique groups in original data: {len(np.unique(orig_groups_np))}")
-
-# --- 4. הגדרת פונקציית המטרה (Objective) ל-Optuna ---
+# --- 4. פונקציית המטרה (Objective) ל-Optuna ---
 print("\n--- Defining Optuna Objective Function ---")
-# (הפונקציה objective כולל הלולאות, ההערכה, והשמירה המותנית)
+top_n_trial_results = [] 
 def objective(trial):
-    start_trial_time = time.time()
-    print(f"\n{'='*15} Optuna Trial {trial.number} Starting {'='*15}")
-    lr = trial.suggest_float("lr", 1e-4, 5e-3, log=True); dropout_p = trial.suggest_float("dropout_p", 0.2, 0.5, step=0.1)
-    weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-3, log=True); specaug_freq = trial.suggest_int("specaug_freq", 5, 25)
-    specaug_time = trial.suggest_int("specaug_time", 10, 50); specaug_f_masks = trial.suggest_int("specaug_f_masks", 1, 2)
-    specaug_t_masks = trial.suggest_int("specaug_t_masks", 1, 2)
-    print(f"  Trial Params: LR={lr:.1e}, Dropout={dropout_p:.2f}, WD={weight_decay:.1e}, SpecAugF={specaug_freq}, SpecAugT={specaug_time}, N_F={specaug_f_masks}, N_T={specaug_t_masks}")
+    start_trial_time = time.time(); print(f"\n--- Optuna Trial {trial.number} ---")
+    lr = trial.suggest_float("lr", 5e-5, 5e-3, log=True); dropout_p = trial.suggest_float("dropout_p", 0.2, 0.6, step=0.1) 
+    weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-3, log=True); stat_feature_dim = trial.suggest_categorical("stat_dim", [32, 64]) # הקטנת אפשרויות
+    combined_dim = trial.suggest_categorical("comb_dim", [64, 128]) # הקטנת אפשרויות
+    specaug_freq = trial.suggest_int("specaug_freq", 10, 25); specaug_time = trial.suggest_int("specaug_time", 20, 50)
+    specaug_f_masks = trial.suggest_int("specaug_f_masks", 1, 2); specaug_t_masks = trial.suggest_int("specaug_t_masks", 1, 2)
+    print(f"Params: LR={lr:.1e}, Dropout={dropout_p:.2f}, WD={weight_decay:.1e}, StatDim={stat_feature_dim}, CombDim={combined_dim}, SpecAugF={specaug_freq}, SpecAugT={specaug_time}, N_F={specaug_f_masks}, N_T={specaug_t_masks}")
+    
     current_train_transforms = transforms.Compose([ SpecAugment(freq_mask_param=specaug_freq, time_mask_param=specaug_time, num_freq_masks=specaug_f_masks, num_time_masks=specaug_t_masks), transforms.Normalize(mean=imagenet_mean, std=imagenet_std) ])
-    kfold = StratifiedGroupKFold(n_splits=N_SPLITS_OPT, shuffle=True, random_state=trial.number + SEED_OFFSET)
-    fold_val_accs = []; fold_new_data_accs = []; qualified_fold_results_in_trial = []
-    X, y, groups = orig_specs_np, orig_labels_np, orig_groups_np
-    unique_groups = np.unique(groups)
-    if len(unique_groups) < N_SPLITS_OPT: print(f"  WARNING: Unique groups ({len(unique_groups)}) < N_SPLITS_OPT ({N_SPLITS_OPT}). Consider setting N_SPLITS_OPT = {len(unique_groups)}.")
-    try: fold_iterator = kfold.split(X, y, groups)
-    except ValueError as e_kfold: print(f"  ERROR during kfold.split: {e_kfold}. Pruning trial."); raise optuna.exceptions.TrialPruned(f"KFold split error: {e_kfold}")
-    for fold, (train_ids, val_ids) in enumerate(fold_iterator):
-        fold_start_time = time.time(); print(f"  --- Fold {fold+1}/{N_SPLITS_OPT} ---")
-        train_groups, val_groups = np.unique(groups[train_ids]), np.unique(groups[val_ids]); overlap = len(set(train_groups) & set(val_groups)); print(f"    Train groups: {len(train_groups)}, Val groups: {len(val_groups)}, Overlap: {overlap}")
-        if overlap > 0: print("    !!!! CRITICAL WARNING: Group overlap detected !!!!")
-        X_train_fold, y_train_fold = X[train_ids], y[train_ids]; X_val_fold, y_val_fold = X[val_ids], y[val_ids]
-        if len(X_train_fold) == 0 or len(X_val_fold) == 0: print(f"    Warning: Fold {fold+1} has empty train/val set. Skipping."); fold_val_accs.append(0.0); fold_new_data_accs.append(0.0); continue
-        train_dataset = SpectrogramDataset(X_train_fold, y_train_fold, transform=current_train_transforms); val_dataset = SpectrogramDataset(X_val_fold, y_val_fold, transform=val_test_transforms)
-        use_pin_memory = (DEVICE == torch.device("cuda"))
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE_OPT, shuffle=True, num_workers=0, pin_memory=use_pin_memory, drop_last=True); val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE_OPT, shuffle=False, num_workers=0, pin_memory=use_pin_memory)
-        # --- שימוש ב-MODEL_NAME_OPT הגלובלי ---
-        model = setup_efficientnet_model(model_name=MODEL_NAME_OPT, pretrained=True, num_classes=NUM_CLASSES, dropout_p=dropout_p)
-        criterion = nn.CrossEntropyLoss(); params_to_optimize = model.classifier.parameters() if not any(p.requires_grad for p in model.features.parameters()) else model.parameters()
-        optimizer = optim.AdamW(params_to_optimize, lr=lr, weight_decay=weight_decay)
-        best_val_acc_fold = 0.0; current_best_fold_model_state = None; epochs_no_improve = 0; best_epoch = -1
-        history_current_fold = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}; best_fold_val_labels = []; best_fold_val_preds = []
-        fold_new_data_labels = []; fold_new_data_preds = []; current_fold_new_data_acc = 0.0
-        print(f"    Starting training for max {EPOCHS_OPT} epochs...")
+    
+    gkf = GroupKFold(n_splits=N_SPLITS_OPT) # אין צורך ב-Random State, הוא לא משפיע על GroupKFold
+    fold_recalls_new_data = []; fold_val_accs = []; fold_best_models = []
+
+    for fold, (train_idx, val_idx) in enumerate(gkf.split(all_specs_np, all_labels_np, groups=all_groups_np)):
+        print(f"  Starting Fold {fold+1}/{N_SPLITS_OPT}...")
+        X_spec_train_fold=all_specs_np[train_idx]; X_stat_train_fold_unscaled=all_stat_features_np[train_idx]; y_train_fold=all_labels_np[train_idx]
+        X_spec_val_fold=all_specs_np[val_idx]; X_stat_val_fold_unscaled=all_stat_features_np[val_idx]; y_val_fold=all_labels_np[val_idx]
+        
+        # נרמול תכונות סטטיסטיות
+        scaler = StandardScaler(); X_stat_train_fold = scaler.fit_transform(X_stat_train_fold_unscaled); X_stat_val_fold = scaler.transform(X_stat_val_fold_unscaled)     
+
+        train_dataset = HybridDataset(torch.from_numpy(X_spec_train_fold).float(), torch.from_numpy(X_stat_train_fold).float(), torch.from_numpy(y_train_fold).long(), spec_transform=current_train_transforms)
+        val_dataset = HybridDataset(torch.from_numpy(X_spec_val_fold).float(), torch.from_numpy(X_stat_val_fold).float(), torch.from_numpy(y_val_fold).long(), spec_transform=val_test_transforms)
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE_OPT, shuffle=True, num_workers=0); val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE_OPT, shuffle=False, num_workers=0)
+
+        model = HybridGeoModel(model_name=MODEL_NAME_OPT, pretrained=True, num_classes=NUM_CLASSES, num_stat_features=NUM_STAT_FEATURES, dropout_p=dropout_p, stat_feature_dim=stat_feature_dim, combined_dim=combined_dim)
+        criterion = nn.CrossEntropyLoss(); params_to_train = [p for p in model.parameters() if p.requires_grad]; optimizer = optim.AdamW(params_to_train, lr=lr, weight_decay=weight_decay) 
+        
+        best_val_acc_fold = 0.0; best_val_loss_fold = float('inf'); current_best_fold_model_state = None; epochs_no_improve = 0; best_epoch = -1
+        history_current_fold_obj = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}; fold_val_labels_final = []; fold_val_preds_final = [] 
+        
         for epoch in range(1, EPOCHS_OPT + 1):
-            epoch_start_time = time.time(); train_loss, train_acc = train_epoch_effnet(model, train_loader, criterion, optimizer, device); val_loss, val_acc, fold_val_labels_epoch, fold_val_preds_epoch = evaluate_model_effnet(model, val_loader, criterion, device); epoch_time = time.time() - epoch_start_time
-            print(f"    Epoch {epoch}/{EPOCHS_OPT} | Train Loss: {train_loss:.4f}, Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f} | Time: {epoch_time:.1f}s")
-            history_current_fold['train_loss'].append(train_loss); history_current_fold['train_acc'].append(train_acc); history_current_fold['val_loss'].append(val_loss); history_current_fold['val_acc'].append(val_acc)
-            if val_acc > best_val_acc_fold: best_val_acc_fold = val_acc; current_best_fold_model_state = deepcopy(model.state_dict()); epochs_no_improve = 0; best_epoch = epoch; best_fold_val_labels = fold_val_labels_epoch; best_fold_val_preds = fold_val_preds_epoch
-            else: epochs_no_improve += 1
-            if epochs_no_improve >= PATIENCE_OPT: print(f"    Early stopping at epoch {epoch}. Best val_acc: {best_val_acc_fold:.4f} at epoch {best_epoch}."); break
+             train_loss, train_acc = train_epoch_hybrid(model, train_loader, criterion, optimizer, device)
+             val_loss, val_acc, fold_val_labels_epoch, fold_val_preds_epoch = evaluate_model_hybrid(model, val_loader, criterion, device) 
+             history_current_fold_obj['train_loss'].append(train_loss); history_current_fold_obj['train_acc'].append(train_acc); history_current_fold_obj['val_loss'].append(val_loss); history_current_fold_obj['val_acc'].append(val_acc)
+             if val_loss < best_val_loss_fold: 
+                 best_val_loss_fold = val_loss; best_val_acc_at_best_loss = val_acc; current_best_fold_model_state = deepcopy(model.state_dict()); epochs_no_improve = 0; best_epoch = epoch
+                 fold_val_labels_final = fold_val_labels_epoch; fold_val_preds_final = fold_val_preds_epoch
+             else: epochs_no_improve += 1
+             if epochs_no_improve >= PATIENCE_OPT: break 
+        
+        current_fold_new_data_recall = 0.0; fold_new_data_labels=None; fold_new_data_preds=None 
         if current_best_fold_model_state and new_specs_np.size > 0:
-            print(f"\n    Fold {fold+1} finished. Best Val Acc (Epoch {best_epoch}): {best_val_acc_fold:.4f}.")
-            if MIN_VAL_ACC_THRESHOLD <= best_val_acc_fold <= MAX_VAL_ACC_THRESHOLD:
-                print(f"      Val Acc within threshold. Evaluating on new data..."); model.load_state_dict(current_best_fold_model_state); new_dataset = SpectrogramDataset(new_specs_np, new_labels_np, transform=val_test_transforms); new_loader = DataLoader(new_dataset, batch_size=BATCH_SIZE_OPT, shuffle=False, num_workers=0, pin_memory=use_pin_memory)
-                try:
-                    new_loss, new_acc, fold_new_data_labels_eval, fold_new_data_preds_eval = evaluate_model_effnet(model, new_loader, criterion, device); current_fold_new_data_acc = new_acc; fold_new_data_labels = fold_new_data_labels_eval; fold_new_data_preds = fold_new_data_preds_eval
-                    print(f"        -> New Data Eval: Loss={new_loss:.4f}, Accuracy={current_fold_new_data_acc:.4f}")
-                    qualified_fold_results_in_trial.append({ 'fold': fold + 1, 'val_acc': best_val_acc_fold, 'new_acc': current_fold_new_data_acc, 'epoch': best_epoch, 'history': history_current_fold, 'val_labels': best_fold_val_labels, 'val_preds': best_fold_val_preds, 'new_labels': fold_new_data_labels, 'new_preds': fold_new_data_preds, 'state_dict': deepcopy(current_best_fold_model_state) })
-                    if best_val_acc_fold >= SAVE_THRESHOLD_VAL and current_fold_new_data_acc >= SAVE_THRESHOLD_NEW:
-                        print(f"    **** Fold {fold+1} (Trial {trial.number}) meets saving criteria! Saving... ****")
-                        try:
-                            model_filename_cond = os.path.join(QUALIFIED_MODELS_DIR, f"model_trial_{trial.number}_fold_{fold+1}_val_{best_val_acc_fold:.3f}_new_{current_fold_new_data_acc:.3f}.pth")
-                            save_data_fold = { 'model_state_dict': current_best_fold_model_state, 'trial_number': trial.number, 'fold': fold + 1, 'epoch': best_epoch, 'val_acc': best_val_acc_fold, 'test_acc_normalized': current_fold_new_data_acc, 'model_name': MODEL_NAME_OPT, 'hyperparameters': trial.params, 'imagenet_mean': imagenet_mean, 'imagenet_std': imagenet_std, 'class_names': CLASS_NAMES, 'N_MELS': N_MELS, 'N_FFT': N_FFT, 'HOP_LENGTH': HOP_LENGTH, 'IMG_HEIGHT_FINAL': IMG_HEIGHT_FINAL, 'IMG_WIDTH_FINAL': IMG_WIDTH_FINAL, 'window_size': window_size, 'stride': stride, 'fs': fs, 'lowcut': lowcut, 'highcut': highcut, 'order': order, 'kfold_random_state': trial.number + SEED_OFFSET }
-                            torch.save(save_data_fold, model_filename_cond); print(f"      Saved qualified model to: {model_filename_cond}")
-                            summary_filename_cond = model_filename_cond.replace(".pth", "_summary.txt")
-                            with open(summary_filename_cond, 'w', encoding='utf-8') as f_sum: f_sum.write(f"Qualified Model Summary\nTrial: {trial.number}, Fold: {fold+1}, Best Epoch: {best_epoch}\nVal Acc: {best_val_acc_fold:.4f}\nNew Data Acc: {current_fold_new_data_acc:.4f}\n\nHyperparameters:\n"); [f_sum.write(f"  {k}: {v}\n") for k,v in trial.params.items()]; print(f"      Saved qualified summary to: {summary_filename_cond}")
-                        except Exception as e_save_cond: print(f"      ERROR saving qualified model: {e_save_cond}"); traceback.print_exc()
-                except Exception as e_eval_new: print(f"        ERROR during new data evaluation: {e_eval_new}"); traceback.print_exc(); current_fold_new_data_acc = 0.0
-            else: print(f"      Val Acc ({best_val_acc_fold:.4f}) outside evaluation threshold. Skipping new data evaluation.")
-        elif new_specs_np.size == 0: print(f"    No new data loaded. Skipping new data evaluation.")
-        else: print(f"    No best model state found from training. Skipping new data evaluation.")
-        fold_val_accs.append(best_val_acc_fold); fold_new_data_accs.append(current_fold_new_data_acc)
-        trial.report(best_val_acc_fold, fold)
-        if trial.should_prune(): print(f"  Trial {trial.number} pruned at fold {fold+1}."); raise optuna.exceptions.TrialPruned()
-        print(f"  --- Fold {fold+1} Finished. Time: {time.time() - fold_start_time:.1f}s ---")
-        del model, optimizer, criterion, train_loader, val_loader, train_dataset, val_dataset;
-        if DEVICE == torch.device("cuda"): torch.cuda.empty_cache()
-    average_val_acc = np.mean(fold_val_accs) if fold_val_accs else 0.0; qualified_new_accs = [f['new_acc'] for f in qualified_fold_results_in_trial]; average_acc_new_data = np.mean(qualified_new_accs) if qualified_new_accs else 0.0
-    print(f"\n--- Finished Trial {trial.number} ---"); print(f"  Avg Val Acc (all folds): {average_val_acc:.4f}"); print(f"  Avg Test Acc (qualified folds): {average_acc_new_data:.4f}"); print(f"  Folds eval on new data: {len(qualified_new_accs)}/{N_SPLITS_OPT}"); print(f"  Total Trial Time: {time.time() - start_trial_time:.1f}s"); print(f"{'='*40}")
-    trial_summary = { 'trial_num': trial.number, 'params': trial.params, 'avg_val_acc': average_val_acc, 'avg_test_acc_new': average_acc_new_data, 'qualified_folds_metrics': [{'fold': f['fold'], 'val_acc': f['val_acc'], 'new_acc': f['new_acc']} for f in qualified_fold_results_in_trial] }; trial.set_user_attr("trial_summary", trial_summary)
-    fold_results_no_state = [{k: v for k, v in fold_res.items() if k != 'state_dict'} for fold_res in qualified_fold_results_in_trial]; trial.set_user_attr("qualified_fold_results_no_state", fold_results_no_state)
-    best_fold_in_trial_state_dict = None; best_fold_num_in_trial = -1
-    if qualified_fold_results_in_trial:
-        qualified_fold_results_in_trial.sort(key=lambda x: (-x['val_acc'], -x['new_acc'])); best_qualified_fold_info = qualified_fold_results_in_trial[0]
-        best_fold_in_trial_state_dict = best_qualified_fold_info['state_dict']; best_fold_num_in_trial = best_qualified_fold_info['fold']
-        print(f"  Best fold in trial: Fold {best_fold_num_in_trial} (Val:{best_qualified_fold_info['val_acc']:.4f}, New:{best_qualified_fold_info['new_acc']:.4f})"); trial.set_user_attr("best_fold_state_dict", best_fold_in_trial_state_dict); trial.set_user_attr("best_fold_num_in_trial", best_fold_num_in_trial); print(f"  Stored state_dict for best fold {best_fold_num_in_trial}.")
-    else: print("  No qualified folds in trial."); trial.set_user_attr("best_fold_state_dict", None); trial.set_user_attr("best_fold_num_in_trial", -1)
-    del qualified_fold_results_in_trial; return average_acc_new_data
+             if MIN_VAL_ACC_THRESHOLD <= best_val_acc_at_best_loss <= MAX_VAL_ACC_THRESHOLD: 
+                 model.load_state_dict(current_best_fold_model_state)
+                 if new_stat_features_np.size > 0:
+                     X_stat_new_scaled = scaler.transform(new_stat_features_np) # <<< שימוש ב-scaler מהאימון
+                     new_dataset = HybridDataset(torch.from_numpy(new_specs_np).float(), torch.from_numpy(X_stat_new_scaled).float(), torch.from_numpy(new_labels_np).long(), spec_transform=val_test_transforms) 
+                     new_loader = DataLoader(new_dataset, batch_size=BATCH_SIZE_OPT, shuffle=False, num_workers=0)
+                     try:
+                         _, _, fold_new_data_labels, fold_new_data_preds = evaluate_model_hybrid(model, new_loader, criterion, device) 
+                         current_fold_new_data_recall = recall_score(fold_new_data_labels, fold_new_data_preds, labels=[LABEL_MAN], average='micro', zero_division=0)
+                         print(f"    Fold {fold+1}: BestValLoss={best_val_loss_fold:.4f}(Acc={best_val_acc_at_best_loss:.4f}), NewRecall={current_fold_new_data_recall:.4f} (Ep {best_epoch}) -> QUALIFIED")
+                         fold_best_models.append({ 'fold': fold+1, 'val_acc': best_val_acc_at_best_loss, 'new_recall': current_fold_new_data_recall, 'epoch': best_epoch, 'state_dict': current_best_fold_model_state, 'history': history_current_fold_obj, 'scaler': scaler, 
+                                                  'val_labels': fold_val_labels_final, 'val_preds': fold_val_preds_final, 'new_labels': fold_new_data_labels, 'new_preds': fold_new_data_preds })
+                     except Exception as eval_e: current_fold_new_data_recall = 0.0; print(f"    Fold {fold+1}: ValAcc={best_val_acc_at_best_loss:.4f}, NewRecall=EVAL FAILED: {eval_e}")
+                 else: print(f"    Fold {fold+1}: Cannot eval new data - missing scaled stat features.")
+             else: print(f"    Fold {fold+1}: ValAcc at best loss ({best_val_acc_at_best_loss:.4f}) is Outside threshold. Skip.")
+        fold_recalls_new_data.append(current_fold_new_data_recall); fold_val_accs.append(best_val_acc_at_best_loss if best_epoch != -1 else 0) 
+        try: trial.report(current_fold_new_data_recall, fold); If trial.should_prune(): print("  Trial pruned."); raise optuna.exceptions.TrialPruned()
+        except Exception as e_prune: print(f"  Optuna reporting/pruning error: {e_prune}")
+            
+    average_recall = np.mean(fold_recalls_new_data) if fold_recalls_new_data else 0.0
+    average_val_acc = np.mean(fold_val_accs) if fold_val_accs else 0.0
+    print(f"--- Finished Trial {trial.number} (Avg ValAccAtBestLoss: {average_val_acc:.4f}, Avg NewRecall: {average_recall:.4f}, Time: {time.time() - start_trial_time:.1f}s) ---")
+    # <<< ציון משולב לאופטימיזציה >>>
+    combined_score = 0.4 * average_val_acc + 0.6 * average_recall # התאמת משקלים אולי?
+    if fold_best_models: # שמור מידע רק אם היו מודלים מוצלחים
+        trial_info = { 'trial_num': trial.number, 'combined_score': combined_score, 'avg_recall': average_recall, 'avg_val_acc': average_val_acc, 'params': trial.params, 'fold_models': fold_best_models }
+        try: 
+          current_best_score = study.user_attrs.get("best_overall_score", -1.0)
+          if combined_score > current_best_score:
+               study.set_user_attr("best_overall_score", combined_score)
+               study.set_user_attr("best_trial_info", trial_info); print(f"  Trial {trial.number} is currently the best overall (Score: {combined_score:.4f}).")
+        except Exception as e_attr: print(f"Could not set user_attr: {e_attr}")
+    return combined_score # החזר את הציון המשולב
 
 # --- 5. הרצת החיפוש עם Optuna ---
 print("\n--- Starting Optuna Hyperparameter Optimization ---")
-study = None
-try: study = joblib.load(STUDY_FILENAME); print(f"Loaded existing Optuna study '{STUDY_NAME_OPT}' from {STUDY_FILENAME}"); print(f"  Number of trials already: {len(study.trials)}")
-except FileNotFoundError: print(f"Creating new study '{STUDY_NAME_OPT}'..."); sampler = optuna.samplers.TPESampler(seed=42); pruner = optuna.pruners.MedianPruner(n_startup_trials=max(1, N_SPLITS_OPT // 2), n_warmup_steps=N_SPLITS_OPT // 2, interval_steps=1); study = optuna.create_study(study_name=STUDY_NAME_OPT, direction="maximize", sampler=sampler, pruner=pruner)
-except Exception as e_load: print(f"Error loading study: {e_load}. Creating new one."); study = optuna.create_study(study_name=STUDY_NAME_OPT, direction="maximize")
-save_callback = lambda study, trial: joblib.dump(study, STUDY_FILENAME); print(f"Study will be saved to {STUDY_FILENAME} after each trial.")
-try:
-    n_trials_to_run = 100; print(f"Starting optimization run. Max time: {TIMEOUT_SECONDS_OPT / 3600:.1f} hours. Target trials: approx {n_trials_to_run}")
-    study.optimize( objective, timeout=TIMEOUT_SECONDS_OPT, callbacks=[save_callback], gc_after_trial=True )
-except KeyboardInterrupt: print("\nOptimization interrupted by user.")
-except Exception as e_optimize: print(f"\nAn error occurred during optimization: {e_optimize}"); traceback.print_exc()
-finally:
-    print("Saving final study state...")
-    try: joblib.dump(study, STUDY_FILENAME); print(f"Study saved successfully to {STUDY_FILENAME}")
-    except Exception as e_save: print(f"Could not save final study state: {e_save}")
+try: study = joblib.load(STUDY_FILENAME); print(f"Loaded study '{STUDY_NAME_OPT}'")
+except FileNotFoundError: print(f"Creating new study '{STUDY_NAME_OPT}'..."); study = optuna.create_study(study_name=STUDY_NAME_OPT, direction="maximize")
+def save_study_callback(study, trial): joblib.dump(study, STUDY_FILENAME)
+print(f"Optimizing for max {TIMEOUT_SECONDS_OPT / 3600:.1f} hours...")
+try: study.optimize( objective, timeout=TIMEOUT_SECONDS_OPT, callbacks=[save_study_callback], gc_after_trial=True, n_jobs=1 )
+except KeyboardInterrupt: print("\nOptimization stopped manually."); joblib.dump(study, STUDY_FILENAME); print("Study saved.")
+except Exception as e: print(f"\nAn error occurred: {e}"); joblib.dump(study, STUDY_FILENAME); print("Study saved.")
 
-# --- 6. ניתוח ושמירת המודל הטוב ביותר (לפי מטרת Optuna) ---
+# --- 6. סיכום, שמירת Top N מודלים, והצגת דוח ---
 print("\n--- Optimization Finished ---")
-# (קטע הניתוח ובחירת המודל הטוב ביותר - ללא שינוי)
-if not study: print("Study object unavailable. Exiting analysis.")
-else:
-    print(f"Number of finished trials: {len(study.trials)}"); completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-    if not completed_trials: print("No completed trials found.")
-    else:
-        print(f"Number of completed trials: {len(completed_trials)}"); best_trial_overall = None
-        try:
-            completed_trials_with_value = [t for t in completed_trials if t.value is not None]
-            if not completed_trials_with_value: print("No completed trials with a valid objective value found.")
-            else:
-                completed_trials_with_value.sort(key=lambda t: t.value, reverse=True); best_trial_overall = completed_trials_with_value[0]
-                print(f"\nBest Completed Trial Found (by Optuna obj): #{best_trial_overall.number}"); print(f"  Value (Avg Test Acc): {best_trial_overall.value:.4f}"); print(f"  Params: {best_trial_overall.params}")
-                best_trial_summary = best_trial_overall.user_attrs.get("trial_summary"); best_fold_state_dict = best_trial_overall.user_attrs.get("best_fold_state_dict"); best_fold_num = best_trial_overall.user_attrs.get("best_fold_num_in_trial", -1); best_fold_results_full = None
-                if best_trial_summary: print("\n  Summary of Best Trial:"); print(f"    Avg Val Acc (all folds): {best_trial_summary.get('avg_val_acc', 'N/A'):.4f}"); print("    Qualified Folds Metrics (Fold: ValAcc, TestAcc):"); metrics = best_trial_summary.get('qualified_folds_metrics',[]); [print(f"      - Fold {fm['fold']}: {fm['val_acc']:.4f}, {fm['new_acc']:.4f}") for fm in metrics] if metrics else print("      None")
-                qualified_folds_no_state = best_trial_overall.user_attrs.get("qualified_fold_results_no_state", [])
-                if best_fold_num != -1:
-                    for fold_info in qualified_folds_no_state:
-                        if fold_info['fold'] == best_fold_num: best_fold_results_full = fold_info; break
-                if best_fold_state_dict and best_fold_results_full:
-                    print(f"\n--- Saving Best Model (Fold {best_fold_num} from Trial {best_trial_overall.number}) ---"); print(f"Saving to: {BEST_MODEL_FILENAME}")
-                    try:
-                        save_data = { 'model_state_dict': best_fold_state_dict, 'trial_number': best_trial_overall.number, 'fold': best_fold_results_full['fold'], 'epoch': best_fold_results_full['epoch'], 'val_acc': best_fold_results_full['val_acc'], 'test_acc_normalized': best_fold_results_full['new_acc'], 'model_name': MODEL_NAME_OPT, 'hyperparameters': best_trial_overall.params, 'imagenet_mean': imagenet_mean, 'imagenet_std': imagenet_std, 'class_names': CLASS_NAMES, 'N_MELS': N_MELS, 'N_FFT': N_FFT, 'HOP_LENGTH': HOP_LENGTH, 'IMG_HEIGHT_FINAL': IMG_HEIGHT_FINAL, 'IMG_WIDTH_FINAL': IMG_WIDTH_FINAL, 'window_size': window_size, 'stride': stride, 'fs': fs, 'lowcut': lowcut, 'highcut': highcut, 'order': order, 'kfold_random_state': best_trial_overall.number + SEED_OFFSET, 'optuna_objective_value': best_trial_overall.value, }
-                        torch.save(save_data, BEST_MODEL_FILENAME); print("  Best model (Optuna obj) saved.")
-                        summary_txt_filename = os.path.join(SAVE_PATH_BASE, f"BEST_MODEL_summary_{STUDY_NAME_OPT}.txt")
-                        with open(summary_txt_filename, 'w', encoding='utf-8') as f: f.write(f"Best Model Summary (Optuna Objective)\nStudy: {STUDY_NAME_OPT}\nTrial: #{best_trial_overall.number}\nFold: {best_fold_results_full['fold']}, Epoch: {best_fold_results_full['epoch']}\nObj Value: {best_trial_overall.value:.4f}\n\nHyperparams:\n"); [f.write(f"  {k}: {v}\n") for k,v in best_trial_overall.params.items()]; f.write("\nBest Fold Metrics:\n"); f.write(f"  Val Acc: {best_fold_results_full['val_acc']:.4f}\nTest Acc: {best_fold_results_full['new_acc']:.4f}\n")
-                        print(f"  Summary saved to: {summary_txt_filename}")
-                        print("\n--- Generating Plots for Saved Best Model ---")
-                        plot_results_for_model( model_id=f"Best_OptunaObj-Tr{best_trial_overall.number}-Fd{best_fold_num}", history=best_fold_results_full['history'], val_metrics={'labels': best_fold_results_full['val_labels'], 'preds': best_fold_results_full['val_preds']}, new_data_metrics={'labels': best_fold_results_full['new_labels'], 'preds': best_fold_results_full['new_preds']}, class_names=CLASS_NAMES, save_dir=SAVE_PATH_BASE )
-                    except Exception as e_save_analyze: print(f"  ERROR saving/analyzing best model: {e_save_analyze}"); traceback.print_exc()
-                else: print("\nCould not retrieve details/state_dict for the best fold. Cannot save final model.")
-        except Exception as e_best: print(f"An error occurred during final analysis: {e_best}"); traceback.print_exc()
+print("Number of finished trials in study: ", len(study.trials))
+try: best_trial = study.best_trial; print(f"\nBest trial found by Optuna: #{best_trial.number} with Combined Score: {best_trial.value:.4f}"); print("Params:", best_trial.params)
+except ValueError: print("\nNo completed trials found."); best_trial = None
+except Exception as e: print(f"\nError retrieving best trial: {e}"); best_trial = None
+best_trial_info_overall = study.user_attrs.get("best_trial_info", None) 
+if best_trial_info_overall:
+    best_params_file = f"best_params_{STUDY_NAME_OPT}.txt"
+    with open(best_params_file, "w") as f: f.write(f"Best Trial: {best_trial_info_overall['trial_num']}\nScore: {best_trial_info_overall['combined_score']:.4f}\nAvgRecall: {best_trial_info_overall['avg_recall']:.4f}\nAvgValAcc: {best_trial_info_overall['avg_val_acc']:.4f}\nParams:\n"); [f.write(f"  {k}: {v}\n") for k, v in best_trial_info_overall['params'].items()]
+    print(f"\nBest overall trial parameters saved to {best_params_file}")
+    print(f"\n--- Saving and Analyzing Top {TOP_N_MODELS} Individual Fold Models from Best Trial ({best_trial_info_overall['trial_num']}) ---")
+    best_trial_fold_models = best_trial_info_overall.get('fold_models', []); 
+    # <<< מיון לפי הציון המשולב (או עדיין לפי Recall?) - נשאיר Recall כרגע >>>
+    best_trial_fold_models.sort(key=lambda x: x['new_recall'], reverse=True) 
+    num_to_save_and_analyze = min(TOP_N_MODELS, len(best_trial_fold_models))
+    if num_to_save_and_analyze > 0:
+        print(f"Saving and plotting the best {num_to_save_and_analyze} models...")
+        for i in range(num_to_save_and_analyze):
+            model_info = best_trial_fold_models[i]; rank = i + 1; fold_num = model_info['fold']; recall = model_info['new_recall']; val_acc = model_info['val_acc']; epoch = model_info['epoch']
+            print(f"\nRank {rank}: Fold {fold_num}, Recall={recall:.4f}, ValAcc={val_acc:.4f}, Epoch={epoch}")
+            model_filename = os.path.join(SAVE_PATH_BASE, f"rank{rank}_hybrid_model_trial{best_trial_info_overall['trial_num']}_fold{fold_num}_recall{recall:.4f}.pth")
+            try:
+                torch.save({ 'model_state_dict': model_info['state_dict'], 'fold': fold_num, 'epoch': epoch, 'val_acc': val_acc, 'new_data_recall': recall, 'model_name': MODEL_NAME_OPT, 
+                             'params': best_trial_info_overall['params'], 'imagenet_mean': imagenet_mean, 'imagenet_std': imagenet_std, 'scaler_state': model_info.get('scaler') }, model_filename)
+                print(f"  Model Rank {rank} saved to: {model_filename}")
+                plot_final_results(f"Rank {rank} (Trial {best_trial_info_overall['trial_num']} Fold {fold_num})", model_info.get('history', {}), model_info.get('val_labels'), model_info.get('val_preds'), model_info.get('new_labels'), model_info.get('new_preds'), model_info.get('new_recall'))
+            except Exception as e: print(f"  Error saving or plotting model Rank {rank}: {e}")
+    else: print("No individual fold models met the criteria in the best trial.")
+    try: import plotly; fig_hist=optuna.visualization.plot_optimization_history(study); fig_imp=optuna.visualization.plot_param_importances(study); fig_hist.show(); fig_imp.show()
+    except ImportError: print("\nInstall plotly to view Optuna plots")
+    except Exception as e_plotly: print(f"Plotly error: {e_plotly}")
+else: print("\nNo trials resulted in models meeting criteria or study data is missing.")
 
-# --- 7. הצגת גרפי Optuna ---
-if study and len(study.trials) > 1:
-    print("\n--- Generating Optuna Study Plots ---")
-    # (קטע הפקת גרפי Optuna - ללא שינוי)
-    if not optuna.visualization.is_available(): print("  Optuna visualization unavailable. pip install plotly kaleido")
-    else:
-        try:
-            print("  Generating optimization history plot..."); fig_hist = optuna.visualization.plot_optimization_history(study); hist_path = os.path.join(SAVE_PATH_BASE, f"{STUDY_NAME_OPT}_optimization_history.png"); fig_hist.write_image(hist_path); print(f"  Saved to {hist_path}")
-            completed_trials_with_value = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and t.value is not None]
-            if completed_trials_with_value: print("  Generating parameter importances plot..."); fig_imp = optuna.visualization.plot_param_importances(study); imp_path = os.path.join(SAVE_PATH_BASE, f"{STUDY_NAME_OPT}_param_importances.png"); fig_imp.write_image(imp_path); print(f"  Saved to {imp_path}")
-            else: print("  Skipping param importances (no completed trials with values).")
-        except ImportError: print("  Install plotly and kaleido for plots.")
-        except Exception as e_plotly: print(f"  Could not generate Optuna plots: {e_plotly}"); traceback.print_exc()
-else: print("\nSkipping Optuna study plots.")
-
-# --- 8. הצגת סיכום המודלים שנשמרו מותנית ---
-print("\n--- Summary of Conditionally Saved Models (Meeting Criteria) ---")
-# (קטע הצגת המודלים השמורים - ללא שינוי)
-saved_model_files = glob.glob(os.path.join(QUALIFIED_MODELS_DIR, "*.pth"))
-if not saved_model_files: print(f"No models found in {QUALIFIED_MODELS_DIR}.")
-else:
-    print(f"Found {len(saved_model_files)} models meeting criteria in {QUALIFIED_MODELS_DIR}:")
-    report_lines = []
-    for model_file in saved_model_files:
-        try:
-            summary_file = model_file.replace(".pth", "_summary.txt")
-            if os.path.exists(summary_file):
-                with open(summary_file, 'r', encoding='utf-8') as f_sum: lines = f_sum.readlines(); info_line = lines[1].strip() if len(lines) > 1 else "N/A"; val_line = lines[2].strip() if len(lines) > 2 else "N/A"; new_line = lines[3].strip() if len(lines) > 3 else "N/A";
-                report_lines.append(f"- {os.path.basename(model_file)} ({info_line}) | {val_line} | {new_line}")
-            else: checkpoint = torch.load(model_file, map_location='cpu'); val_acc = checkpoint.get('val_acc', 0); new_acc = checkpoint.get('test_acc_normalized', 0); trial_n = checkpoint.get('trial_number', 'N/A'); fold_n = checkpoint.get('fold', 'N/A'); report_lines.append(f"- {os.path.basename(model_file)} (Tr:{trial_n}, Fd:{fold_n}) | Val:{val_acc:.4f} | New:{new_acc:.4f}")
-        except Exception as e_report: print(f"  Error reading info for {os.path.basename(model_file)}: {e_report}"); report_lines.append(f"- {os.path.basename(model_file)} (Err reading)")
-    def extract_new_acc(line):
-        try: return float(line.split('New Data Acc: ')[-1].split(')')[0].split('\n')[0]) if 'New Data Acc: ' in line else (float(line.split('New:')[1].strip()) if 'New:' in line else -1)
-        except: return -1
-    report_lines.sort(key=extract_new_acc, reverse=True)
-    for line in report_lines: print(line)
-
-print("\n--- Full Script Finished ---")
+print("\n--- Script Finished ---")
