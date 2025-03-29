@@ -67,9 +67,12 @@ N_SPLITS       = 5
 EPOCHS         = 30
 PATIENCE       = 8
 BATCH_SIZE     = 32
-TIMEOUT_SECONDS = 1 * 900  # 4 שעות
+TIMEOUT_SECONDS = 1 * 900  # לדוגמה: 900 שניות (15 דקות)
 TOP_N_MODELS   = 5
 MIN_VAL_ACC_THRESHOLD = 0.80
+
+# סף ל־Recall בדאטהסט החדש (למשל 0.70)
+NEW_RECALL_THRESHOLD = 0.70
 
 # נתיבי הקבצים
 ORIGINAL_DATA_PATHS = {
@@ -238,16 +241,39 @@ val_transforms = transforms.Compose([
     transforms.Normalize(mean=imagenet_mean, std=imagenet_std)
 ])
 
+class HybridDataset(Dataset):
+    def __init__(self, specs, stat_feats, labels, transform=None):
+        self.specs = specs
+        self.stat_feats = stat_feats
+        self.labels = labels
+        self.transform = transform
+    
+    def __len__(self):
+        return len(self.labels)
+    
+    def __getitem__(self, idx):
+        spec = self.specs[idx]      # צורה: (3, H, W)
+        stat_feat = self.stat_feats[idx]
+        label = self.labels[idx]
+        spec_tensor = torch.tensor(spec, dtype=torch.float32)
+        if self.transform:
+            spec_tensor = self.transform(spec_tensor)
+        stat_tensor = torch.tensor(stat_feat, dtype=torch.float32)
+        return spec_tensor, stat_tensor, label
+
+# --- 5. הגדרת המודל ההיברידי ---
+import torch.nn.functional as F
+
 class HybridGeoModel(nn.Module):
     def __init__(self, dropout_p=0.4, stat_feature_dim=64, combined_dim=128):
         super(HybridGeoModel, self).__init__()
         weights = MobileNet_V3_Small_Weights.DEFAULT
         self.cnn_backbone = mobilenet_v3_small(weights=weights)
-        # Get the output channels of the last convolutional layer
+        # Get the output channels of the last conv layer – adjust as needed
         cnn_out_features = self.cnn_backbone.features[-1][0].out_channels
         print(f"[DEBUG] cnn_out_features: {cnn_out_features}")
         self.cnn_backbone.classifier = nn.Identity()
-        # Freeze some weights
+        # Freeze weights in features
         for param in self.cnn_backbone.features.parameters():
             param.requires_grad = False
         # MLP for statistical features
@@ -265,17 +291,13 @@ class HybridGeoModel(nn.Module):
         self.fc_output = nn.Linear(combined_dim, NUM_CLASSES)
     
     def forward(self, spec_input, stat_input):
-
         cnn_features = self.cnn_backbone(spec_input)
         stat_features = self.stat_mlp(stat_input)
-
         combined = torch.cat((cnn_features, stat_features), dim=1)
-
         x = self.dropout(combined)
         x = F.relu(self.fc_combined(x))
         x = self.dropout(x)
         output = self.fc_output(x)
-
         return output
 
 # --- 6. פונקציות אימון והערכה ---
@@ -325,30 +347,47 @@ def evaluate_model_hybrid(model, dataloader, criterion, device):
     epoch_acc = correct / total
     return epoch_loss, epoch_acc, all_labels, all_preds
 
-def plot_fold_results(title, history, true_labels, pred_labels):
+def plot_fold_results(title, history, true_labels, pred_labels, new_true_labels=None, new_pred_labels=None):
+    # Plot training history
     plt.figure(figsize=(10,4))
     plt.subplot(1,2,1)
     plt.plot(history['train_loss'], label='Train Loss')
     plt.plot(history['val_loss'], label='Val Loss')
     plt.title(f"{title} Loss")
+    plt.xlabel("Epoch")
     plt.legend()
     plt.subplot(1,2,2)
     plt.plot(history['train_acc'], label='Train Acc')
     plt.plot(history['val_acc'], label='Val Acc')
     plt.title(f"{title} Accuracy")
+    plt.xlabel("Epoch")
     plt.legend()
+    plt.tight_layout()
+    plt.savefig(f"{title}_training_history.png")
     plt.show()
-    # מטריצת בלבול
+    
+    # Plot confusion matrix for validation data
     cm = confusion_matrix(true_labels, pred_labels)
     plt.figure(figsize=(6,5))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES)
-    plt.title(f"{title} Confusion Matrix")
+    plt.title(f"{title} Val Confusion Matrix")
     plt.ylabel("True")
     plt.xlabel("Predicted")
+    plt.savefig(f"{title}_val_cm.png")
     plt.show()
+    
+    # Plot confusion matrix for new dataset if provided
+    if new_true_labels is not None and new_pred_labels is not None:
+        cm_new = confusion_matrix(new_true_labels, new_pred_labels)
+        plt.figure(figsize=(6,5))
+        sns.heatmap(cm_new, annot=True, fmt="d", cmap="Blues", xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES)
+        plt.title(f"{title} New Data Confusion Matrix")
+        plt.ylabel("True")
+        plt.xlabel("Predicted")
+        plt.savefig(f"{title}_new_cm.png")
+        plt.show()
 
 # --- 7. פונקציית מטרה לאופטונה (עם GroupKFold) ---
-# נשתמש ב-Optuna לחיפוש היפר-פרמטרים
 STUDY_NAME = "hybrid_model_optuna"
 STUDY_FILENAME = f"{STUDY_NAME}.pkl"
 try:
@@ -442,6 +481,8 @@ def objective(trial):
         
         # הערכת המודל על דאטה חדש אם קיים
         new_data_recall = 0.0
+        new_true = None
+        new_pred = None
         if new_specs.size > 0:
             new_stat_scaled = scaler.transform(new_stat_feats)
             new_dataset = HybridDataset(new_specs, new_stat_scaled, new_labels, transform=val_transforms)
@@ -449,17 +490,25 @@ def objective(trial):
             _, _, new_true, new_pred = evaluate_model_hybrid(model, new_loader, criterion, device)
             new_data_recall = recall_score(new_true, new_pred, average='macro', zero_division=0)
             print(f"    New data recall: {new_data_recall:.4f}")
+        
         fold_recalls.append(new_data_recall)
-        fold_best_models.append({
-            'fold': fold+1,
-            'val_acc': best_val_acc,
-            'new_recall': new_data_recall,
-            'state_dict': best_model_state,
-            'history': history,
-            'scaler': scaler,
-            'val_labels': val_labels,
-            'val_preds': val_preds
-        })
+        
+        # הוספת מודל ל-fold_best_models רק אם ביצועי הדאטה החדש עומדים בסף
+        if new_data_recall >= NEW_RECALL_THRESHOLD:
+            fold_best_models.append({
+                'fold': fold+1,
+                'val_acc': best_val_acc,
+                'new_recall': new_data_recall,
+                'state_dict': best_model_state,
+                'history': history,
+                'scaler': scaler,
+                'val_labels': val_labels,
+                'val_preds': val_preds,
+                'new_labels': new_true,
+                'new_preds': new_pred
+            })
+        else:
+            print(f"    Fold {fold+1}: New data recall {new_data_recall:.4f} is below threshold {NEW_RECALL_THRESHOLD}. Model not saved for this fold.")
     avg_val_acc = np.mean(fold_val_accs)
     avg_recall  = np.mean(fold_recalls)
     combined_score = 0.3 * avg_val_acc + 0.7 * avg_recall
@@ -503,9 +552,14 @@ if fold_models:
             'scaler': model_info['scaler']
         }, model_filename)
         print(f"Saved model for fold {fold_num} to {model_filename}")
-        plot_fold_results(f"Trial {best_trial.number} Fold {fold_num}", model_info['history'], model_info['val_labels'], model_info['val_preds'])
+        # Plot and save graphs: validation history and, if available, new dataset confusion matrix.
+        plot_fold_results(f"Trial{best_trial.number}_Fold{fold_num}",
+                          model_info['history'],
+                          model_info['val_labels'],
+                          model_info['val_preds'],
+                          new_true_labels=model_info.get('new_labels'),
+                          new_pred_labels=model_info.get('new_preds'))
 else:
     print("No fold models available from the best trial.")
 
 print("Script finished.")
-
