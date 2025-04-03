@@ -2,9 +2,10 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F # Needed for Label Smoothing implementation
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+import torchvision.models as models # *** Import torchvision models ***
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -23,39 +24,49 @@ import librosa
 import librosa.display
 
 # --- Configuration ---
-BASE_DATA_DIR = 'DATA'
+BASE_DATA_DIR = 'data'
 MAN2_FOLDER_NAME = 'man2'
-OTHER_FOLDER_NAME = 'OTHER'
+OTHER_FOLDER_NAME = 'other'
 
 TARGET_SAMPLING_RATE = 1000.0
 
 WINDOW_SECONDS = 1.0
-STEP_SECONDS = 0.5
+STEP_SECONDS = 0.5 # Overlap for creating time windows
 WINDOW_SIZE_TIME = int(TARGET_SAMPLING_RATE * WINDOW_SECONDS)
 STEP_SIZE_TIME = int(TARGET_SAMPLING_RATE * STEP_SECONDS)
 
 N_FFT = 512; HOP_LENGTH = 128; N_MELS = 64; FMIN = 0; FMAX = TARGET_SAMPLING_RATE / 2
 
-BATCH_SIZE = 128; LEARNING_RATE = 0.0001; GRADIENT_CLIP_VALUE = 1.0; WEIGHT_DECAY = 1e-3
-DROPOUT_RATE = 0.5; NUM_EPOCHS = 60; VALIDATION_SPLIT_RATIO = 0.15; TEST_SPLIT_RATIO = 0.15
-EARLY_STOPPING_PATIENCE = 10; LR_SCHEDULER_PATIENCE = 5; LR_SCHEDULER_FACTOR = 0.1
-LABEL_SMOOTHING = 0.1
+# --- Training Params for Fine-tuning MobileNetV3 ---
+BATCH_SIZE = 64 # MobileNet might need smaller batch size than simple CNN
+LEARNING_RATE = 0.0001 # Lower LR for fine-tuning
+GRADIENT_CLIP_VALUE = 1.0
+WEIGHT_DECAY = 1e-4 # Standard WD
+DROPOUT_RATE = 0.2 # MobileNet already has dropout, use its default or a small value if needed
+NUM_EPOCHS = 40 # Fine-tuning might converge faster
+VALIDATION_SPLIT_RATIO = 0.15
+TEST_SPLIT_RATIO = 0.15
+EARLY_STOPPING_PATIENCE = 7 # Can be more sensitive
+LR_SCHEDULER_PATIENCE = 3
+LR_SCHEDULER_FACTOR = 0.1
+# LABEL_SMOOTHING = 0.1 # Optional: Can try adding back later if needed
 
+# Augmentation Params (Applied to TIME DOMAIN signal)
 AUGMENT_GAUSSIAN_STD = 0.01; AUGMENT_AMPLITUDE_RANGE = (0.9, 1.1); AUGMENT_TIME_SHIFT_MAX_FRACTION = 0.1
 AUGMENT_OTHER_GAUSSIAN_STD = 0.05; AUGMENT_OTHER_AMPLITUDE_RANGE = (0.7, 1.3); AUGMENT_OTHER_TIME_SHIFT_MAX_FRACTION = 0.2
 
+# Other Settings
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu"); SEED = 42
 ALL_CLASSES = ['man', 'car', 'other']; OTHER_LABEL_STR = 'other'
 
 # --- Setup Reproducibility & Print Config ---
 random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
 if torch.cuda.is_available(): torch.cuda.manual_seed_all(SEED); torch.backends.cudnn.deterministic = True; torch.backends.cudnn.benchmark = False
-print(f"--- Configuration ---"); print(f"Device: {DEVICE}"); print(f"Sampling Rate: {TARGET_SAMPLING_RATE} Hz")
-print(f"Time Window: {WINDOW_SIZE_TIME} samples"); print(f"Classes: {ALL_CLASSES}")
-print(f"Using Mel-Spectrograms + Delta Features (n_fft={N_FFT}, hop={HOP_LENGTH}, n_mels={N_MELS})") # Updated Print
-print(f"Training Params: BS={BATCH_SIZE}, LR={LEARNING_RATE}, WD={WEIGHT_DECAY}, LS={LABEL_SMOOTHING}")
+print(f"--- Configuration ---"); print(f"Device: {DEVICE}"); print(f"SR: {TARGET_SAMPLING_RATE} Hz"); print(f"Time Window: {WINDOW_SIZE_TIME} samples"); print(f"Classes: {ALL_CLASSES}")
+print(f"Using Mel-Spectrograms (n_fft={N_FFT}, hop={HOP_LENGTH}, n_mels={N_MELS})")
+print(f"Using Pre-trained MobileNetV3-Small")
+print(f"Training Params: BS={BATCH_SIZE}, LR={LEARNING_RATE}, WD={WEIGHT_DECAY}") # Removed LS from print
 print(f"Augmentation: Aggressive for '{OTHER_LABEL_STR}'")
-
 
 # --- Data Loading ---
 def load_data_from_file(filepath):
@@ -126,7 +137,6 @@ else: print("  Combined: No windows generated.")
 
 # --- Split Combined TIME Data into Train/Val/Test ---
 if len(all_windows_np_time) > 0:
-    # (Splitting logic remains the same)
     try:
         indices = np.arange(len(all_windows_np_time)); min_samples_per_class = Counter(all_labels_np).most_common()[-1][1] if Counter(all_labels_np) else 0; n_splits_required = 2
         if min_samples_per_class < n_splits_required: raise ValueError(f"Min samples per class ({min_samples_per_class}) < {n_splits_required}")
@@ -168,8 +178,8 @@ def time_window_to_mel_spectrogram(time_window, sr, n_fft=N_FFT, hop_length=HOP_
     mel_spec = librosa.feature.melspectrogram(y=time_window, sr=sr, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels, fmin=fmin, fmax=fmax)
     mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max); return mel_spec_db.astype(np.float32)
 
-# --- PyTorch Dataset: Calculates Spectrogram + Deltas on the fly ---
-class SpectrogramDeltaDataset(Dataset):
+# --- PyTorch Dataset: Calculates Spectrogram (No Deltas for now) ---
+class SpectrogramDataset(Dataset):
     def __init__(self, features_time, labels, source_files, sr, window_size_time,
                  n_fft, hop_length, n_mels, fmin, fmax,
                  augment=False, other_idx=None):
@@ -187,9 +197,8 @@ class SpectrogramDeltaDataset(Dataset):
     def __getitem__(self, idx):
         if self.is_empty: raise IndexError("Dataset is empty")
         signal = self.features_time_np[idx].copy(); label = self.labels_np[idx]; source = self.source_files[idx] if idx < len(self.source_files) else "N/A"
-
         if self.augment:
-            # --- Apply Conditional Augmentation to TIME signal ---
+            # Apply Conditional Augmentation to TIME signal
             is_other = (self.other_idx is not None and label == self.other_idx)
             amp_range=AUGMENT_OTHER_AMPLITUDE_RANGE if is_other else AUGMENT_AMPLITUDE_RANGE; gauss_std=AUGMENT_OTHER_GAUSSIAN_STD if is_other else AUGMENT_GAUSSIAN_STD; shift_frac=AUGMENT_OTHER_TIME_SHIFT_MAX_FRACTION if is_other else AUGMENT_TIME_SHIFT_MAX_FRACTION
             max_shift = int(self.window_size_time * shift_frac);
@@ -198,31 +207,31 @@ class SpectrogramDeltaDataset(Dataset):
             if gauss_std > 0:
                  signal_std_val = np.std(signal)
                  if signal_std_val > 1e-9: noise_std = gauss_std * signal_std_val; noise = np.random.normal(0, noise_std, signal.shape); signal = signal + noise
-            # --- End Augmentation ---
 
-        # --- Calculate Mel Spectrogram and Deltas ---
-        mel_spectrogram_db = time_window_to_mel_spectrogram(signal, self.sr, self.n_fft, self.hop_length, self.n_mels, self.fmin, self.fmax)
-        delta1 = librosa.feature.delta(mel_spectrogram_db, order=1)
-        delta2 = librosa.feature.delta(mel_spectrogram_db, order=2)
-        # Stack features: (channels, n_mels, n_frames) -> (3, n_mels, n_frames)
-        stacked_features = np.stack([mel_spectrogram_db, delta1, delta2], axis=0)
-        # --------------------------------------------
+        mel_spectrogram = time_window_to_mel_spectrogram(signal, self.sr, self.n_fft, self.hop_length, self.n_mels, self.fmin, self.fmax)
 
-        spectrogram_tensor = torch.from_numpy(stacked_features).float() # No need for unsqueeze(0) now
+        # --- !!! Adapt for MobileNetV3: Repeat channel 3 times !!! ---
+        # Input needs to be (3, H, W)
+        spectrogram_tensor = torch.from_numpy(mel_spectrogram)
+        spectrogram_tensor_3channel = spectrogram_tensor.unsqueeze(0).repeat(3, 1, 1) # Shape (3, n_mels, n_frames)
+        # --------------------------------------------------------------
+
         label_tensor = torch.tensor(label, dtype=torch.long)
-        return spectrogram_tensor, label_tensor, source
+        return spectrogram_tensor_3channel, label_tensor, source
 
-# --- Create Datasets using the new SpectrogramDeltaDataset ---
-train_dataset = SpectrogramDeltaDataset(X_train_time, y_train, sources_train, TARGET_SAMPLING_RATE, WINDOW_SIZE_TIME, N_FFT, HOP_LENGTH, N_MELS, FMIN, FMAX, augment=True, other_idx=other_class_index)
-val_dataset = SpectrogramDeltaDataset(X_val_time, y_val, sources_val, TARGET_SAMPLING_RATE, WINDOW_SIZE_TIME, N_FFT, HOP_LENGTH, N_MELS, FMIN, FMAX, augment=False)
-test_dataset = SpectrogramDeltaDataset(X_test_time, y_test, sources_test, TARGET_SAMPLING_RATE, WINDOW_SIZE_TIME, N_FFT, HOP_LENGTH, N_MELS, FMIN, FMAX, augment=False)
+# --- Create Datasets ---
+train_dataset = SpectrogramDataset(X_train_time, y_train, sources_train, TARGET_SAMPLING_RATE, WINDOW_SIZE_TIME, N_FFT, HOP_LENGTH, N_MELS, FMIN, FMAX, augment=True, other_idx=other_class_index)
+val_dataset = SpectrogramDataset(X_val_time, y_val, sources_val, TARGET_SAMPLING_RATE, WINDOW_SIZE_TIME, N_FFT, HOP_LENGTH, N_MELS, FMIN, FMAX, augment=False)
+test_dataset = SpectrogramDataset(X_test_time, y_test, sources_test, TARGET_SAMPLING_RATE, WINDOW_SIZE_TIME, N_FFT, HOP_LENGTH, N_MELS, FMIN, FMAX, augment=False)
 
-# --- PyTorch DataLoaders ---
+# --- DataLoaders ---
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 print(f"\nDataLoaders created. Batches per epoch (Train): {len(train_loader)}")
 
+
+# --- Visualization Functions ---
 # --- Visualization Functions ---
 # (Definitions for plot_samples_per_file, plot_raw_signals, plot_fft_signals remain unchanged)
 # --- Visualization Functions (Full Definitions) ---
@@ -306,113 +315,67 @@ def plot_spectrograms(dataset, label_encoder, n_samples=3):
     if len(dataset) == 0: print("  Dataset is empty."); return
     num_classes = len(label_encoder.classes_);
     fig, axs = plt.subplots(num_classes, n_samples, figsize=(n_samples * 4, num_classes * 3))
-    if num_classes == 1: axs = np.array([[axs]]) # Adjust shape if only 1 class
-    elif n_samples == 1: axs = axs[:, np.newaxis] # Adjust shape if only 1 sample
+    if num_classes == 1: axs = np.array([[axs]]) if n_samples > 1 else np.array([[axs]])
+    elif n_samples == 1: axs = axs[:, np.newaxis]
     fig.suptitle('Mel-Spectrogram Examples per Class')
     all_labels_np = dataset.labels_np
 
-    # Get shape dynamically from first sample if possible
-    try:
-         first_spec, _, _ = dataset[0]
-         spec_shape_vis = first_spec.shape # (1, n_mels, n_frames)
-         img_shape = spec_shape_vis[1:] # (n_mels, n_frames)
-    except IndexError:
-         print("Cannot get sample to determine spectrogram shape."); return
+    try: first_spec_vis, _, _ = dataset[0]; INPUT_HEIGHT_vis=first_spec_vis.shape[1]; INPUT_WIDTH_vis=first_spec_vis.shape[2]
+    except (IndexError, AttributeError): print("Cannot get sample for shape info."); return
 
     for i, class_name in enumerate(label_encoder.classes_):
         class_indices = np.where(all_labels_np == i)[0]
         if len(class_indices) == 0:
             for j in range(n_samples):
-                if i < axs.shape[0] and j < axs.shape[1]: axs[i, j].text(0.5, 0.5, 'No Samples'); axs[i, j].set_title(f"{class_name} - Sample {j+1}"); axs[i, j].axis('off')
+                if i < axs.shape[0] and j < axs.shape[1]: axs[i, j].text(0.5, 0.5, 'No Samples'); axs[i,j].axis('off')
             continue
         random_indices = np.random.choice(class_indices, min(n_samples, len(class_indices)), replace=False)
         for j, sample_idx in enumerate(random_indices):
              if i < axs.shape[0] and j < axs.shape[1]:
-                # Fetch item WITHOUT augmentation for clear visualization
-                # Need to recompute spectrogram from original time signal
                 orig_signal = dataset.features_time_np[sample_idx]
-                mel_spectrogram_db = time_window_to_mel_spectrogram(
-                    orig_signal, dataset.sr, dataset.n_fft, dataset.hop_length, dataset.n_mels, dataset.fmin, dataset.fmax
-                )
-                img = librosa.display.specshow(mel_spectrogram_db, sr=dataset.sr, hop_length=dataset.hop_length,
-                                               x_axis='time', y_axis='mel', ax=axs[i,j], fmin=dataset.fmin, fmax=dataset.fmax)
+                mel_spectrogram_db = time_window_to_mel_spectrogram(orig_signal, dataset.sr, dataset.n_fft, dataset.hop_length, dataset.n_mels, dataset.fmin, dataset.fmax)
+                img = librosa.display.specshow(mel_spectrogram_db, sr=dataset.sr, hop_length=dataset.hop_length, x_axis='time', y_axis='mel', ax=axs[i,j], fmin=dataset.fmin, fmax=dataset.fmax)
                 axs[i, j].set_title(f"{class_name} - Sample {j+1}")
-                # fig.colorbar(img, ax=axs[i,j], format='%+2.0f dB') # Optional colorbar
     plt.tight_layout(rect=[0, 0.03, 1, 0.97]); plt.show()
 
-def plot_fft_signals(dataset, label_encoder, n_samples=3):
-    """Plots FFT magnitude spectrum examples for each class (uses original numpy data)."""
-    print("\nPlotting FFT examples per CLASS...")
-    if len(dataset) == 0: print("  Dataset is empty."); return
-    num_classes = len(label_encoder.classes_); fig, axs = plt.subplots(num_classes, n_samples, figsize=(n_samples * 4, num_classes * 2), sharex=True, squeeze=False); fig.suptitle('FFT Magnitude Spectrum Examples per Class')
-    freq_axis = np.fft.rfftfreq(dataset.window_size, 1.0/TARGET_SAMPLING_RATE); all_labels_np = dataset.labels_np
-    for i, class_name in enumerate(label_encoder.classes_):
-        class_indices = np.where(all_labels_np == i)[0]
-        if len(class_indices) == 0:
-            for j in range(n_samples):
-                if i < axs.shape[0] and j < axs.shape[1]: axs[i, j].text(0.5, 0.5, 'No Samples', ha='center', va='center'); axs[i, j].set_title(f"{class_name} - Sample {j+1}"); axs[i, j].set_xticks([]); axs[i, j].set_yticks([])
-            continue
-        random_indices = np.random.choice(class_indices, min(n_samples, len(class_indices)), replace=False)
-        for j, sample_idx in enumerate(random_indices):
-            if i < axs.shape[0] and j < axs.shape[1]:
-                signal_np = dataset.features_np[sample_idx] # Use original numpy signal
-                fft_vals = np.fft.rfft(signal_np); fft_mag = np.abs(fft_vals); axs[i, j].plot(freq_axis, fft_mag)
-                axs[i, j].set_title(f"{class_name} - Sample {j+1}");
-                if i == num_classes - 1: axs[i, j].set_xlabel('Frequency (Hz)')
-                if j == 0: axs[i, j].set_ylabel('Magnitude')
-                axs[i,j].set_xlim(0, TARGET_SAMPLING_RATE / 10) # Show up to 100Hz
-    plt.tight_layout(rect=[0, 0.03, 1, 0.97]); plt.show()
 
 # --- Plot initial visualizations ---
-if len(train_dataset) > 0:
-    # plot_spectrograms(train_dataset, label_encoder_3class) # Visualize the spectrograms
-    pass # Skip visualizations for brevity now, focus on training
-else: print("\nTraining dataset empty, skipping initial visualizations.")
+if len(train_dataset) > 0: plot_spectrograms(train_dataset, label_encoder_3class)
+else: print("\nTraining dataset empty.")
 
 
-# --- Model Definition (2D CNN adapted for 3 input channels) ---
-class Simple2DCNN_3Class_Delta(nn.Module):
-    def __init__(self, num_classes, input_height, input_width, dropout_rate):
-        super(Simple2DCNN_3Class_Delta, self).__init__()
-        # --- !!! Input channels = 3 !!! ---
-        self.conv_block1 = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1), # Changed in_channels to 3
-            nn.BatchNorm2d(16), nn.ReLU(), nn.MaxPool2d(kernel_size=2, stride=2)
-        )
-        # ---------------------------------
-        self.conv_block2 = nn.Sequential(
-            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(32), nn.ReLU(), nn.MaxPool2d(kernel_size=2, stride=2)
-        )
-        self.conv_block3 = nn.Sequential(
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(64), nn.ReLU(), nn.MaxPool2d(kernel_size=2, stride=2)
-        )
-        with torch.no_grad():
-             # Input shape is now (B, 3, H, W)
-            dummy_input = torch.zeros(1, 3, input_height, input_width) # Changed channel dim to 3
-            dummy_output = self.conv_block3(self.conv_block2(self.conv_block1(dummy_input)))
-            self.flattened_size = dummy_output.numel();
-            if self.flattened_size <= 0 : raise ValueError(f"Flattened size invalid: {self.flattened_size}.")
-        self.fc_block = nn.Sequential(nn.Flatten(), nn.Linear(self.flattened_size, 128), nn.ReLU(), nn.Dropout(dropout_rate), nn.Linear(128, num_classes))
-    def forward(self, x): # Input x shape: (Batch, 3, n_mels, n_frames)
-        x = self.conv_block1(x); x = self.conv_block2(x); x = self.conv_block3(x); x = self.fc_block(x); return x
+# --- Model Definition (MobileNetV3-Small Pre-trained) ---
+print("\n--- Defining Model (MobileNetV3-Small Pre-trained) ---")
+try:
+    model = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1) # Use updated API for weights
 
-# --- Instantiate the 2D CNN Model (with Delta) ---
-if len(train_dataset) > 0:
-    try:
-        first_spec_sample, _, _ = train_dataset[0] # Get one sample: (3, n_mels, n_frames)
-        INPUT_CHANNELS = first_spec_sample.shape[0] # Should be 3
-        INPUT_HEIGHT = first_spec_sample.shape[1]   # n_mels
-        INPUT_WIDTH = first_spec_sample.shape[2]    # n_frames
-        if INPUT_CHANNELS != 3: print(f"Warning: Expected 3 input channels (Spec+Deltas), but got {INPUT_CHANNELS}")
-        print(f"Input Spectrogram+Delta dimensions: Channels={INPUT_CHANNELS}, Height={INPUT_HEIGHT}, Width={INPUT_WIDTH}")
-        model = Simple2DCNN_3Class_Delta(num_classes=len(ALL_CLASSES), input_height=INPUT_HEIGHT, input_width=INPUT_WIDTH, dropout_rate=DROPOUT_RATE).to(DEVICE)
-        print("\nModel Architecture (2D CNN with Deltas):"); total_params = sum(p.numel() for p in model.parameters() if p.requires_grad); print(f"Params: {total_params:,}")
-    except Exception as e: print(f"Error instantiating model: {e}"); model = None
-else: print("ERROR: Training dataset empty."); model = None
+    # Modify the classifier head
+    num_ftrs = model.classifier[3].in_features
+    # Replace the last layer with a new one for our number of classes
+    model.classifier[3] = nn.Linear(num_ftrs, len(ALL_CLASSES))
+
+    model = model.to(DEVICE) # Move model to device
+    print("MobileNetV3-Small loaded and modified successfully.")
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total Trainable Parameters (after modification): {total_params:,}")
+
+except Exception as e:
+    print(f"Error loading/modifying MobileNetV3: {e}")
+    print("Falling back to Simple2DCNN - consider installing torchvision or checking model availability.")
+    model = None
+    # --- Fallback to Simple 2D CNN if MobileNet fails ---
+    if len(train_dataset) > 0:
+        try:
+            first_spec_sample, _, _ = train_dataset[0]; INPUT_HEIGHT=first_spec_sample.shape[1]; INPUT_WIDTH=first_spec_sample.shape[2]
+            model = Simple2DCNN_3Class(num_classes=len(ALL_CLASSES), input_height=INPUT_HEIGHT, input_width=INPUT_WIDTH, dropout_rate=DROPOUT_RATE).to(DEVICE) # Need Simple2DCNN defined
+            print("Using Simple2DCNN as fallback.")
+        except Exception as e2:
+            print(f"Error instantiating Simple2DCNN as fallback: {e2}")
+            model = None
+
 
 # --- Label Smoothing Loss Function ---
+# (Definition remains the same)
 class LabelSmoothingCrossEntropy(nn.Module):
     # (Definition remains the same)
     def __init__(self, smoothing=0.1): super().__init__(); self.smoothing = smoothing
@@ -424,27 +387,31 @@ class LabelSmoothingCrossEntropy(nn.Module):
 
 # --- Training Setup ---
 if model is not None:
-    criterion = LabelSmoothingCrossEntropy(smoothing=LABEL_SMOOTHING)
+    # criterion = LabelSmoothingCrossEntropy(smoothing=LABEL_SMOOTHING) # Use LS if desired
+    criterion = nn.CrossEntropyLoss(weight=class_weights_tensor) # Start with standard weighted CE for fine-tuning
+    # Fine-tune: Optimize all parameters with a low LR initially
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=LR_SCHEDULER_FACTOR, patience=LR_SCHEDULER_PATIENCE, verbose=True)
 else: criterion, optimizer, scheduler = None, None, None
 
+
 # --- Training Loop ---
+# (Training loop logic remains the same, but will use MobileNet)
 history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
 best_val_loss = float('inf'); epochs_no_improve = 0; best_model_state = None
 run_validation = len(val_dataset) > 0
 if not run_validation: best_val_loss = -1
 
 if model is not None and optimizer is not None and criterion is not None:
-    print("\n--- Starting Training (3 Classes, Spectrograms + Deltas, 2D CNN) ---")
+    print("\n--- Starting Training (Fine-tuning MobileNetV3) ---")
     start_time = time.time()
     # (Training loop logic remains the same)
     for epoch in range(NUM_EPOCHS):
         model.train(); running_loss = 0.0; correct_train = 0; total_train = 0
         for i, batch_data in enumerate(train_loader):
-            inputs, labels, _ = batch_data # Dataset yields spec+deltas, label, source
+            inputs, labels, _ = batch_data
             inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
-            optimizer.zero_grad(); outputs = model(inputs); loss = criterion(outputs, labels, weight=class_weights_tensor) # Pass weights
+            optimizer.zero_grad(); outputs = model(inputs); loss = criterion(outputs, labels) # Use standard CE here (weights are inside)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRADIENT_CLIP_VALUE)
             optimizer.step()
@@ -462,7 +429,7 @@ if model is not None and optimizer is not None and criterion is not None:
                 for batch_data in val_loader:
                     inputs, labels, _ = batch_data
                     inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
-                    outputs = model(inputs); loss = val_criterion(outputs, labels) # Use standard CE for val metric
+                    outputs = model(inputs); loss = val_criterion(outputs, labels)
                     running_val_loss += loss.item() * inputs.size(0); _, predicted = torch.max(outputs.data, 1)
                     total_val += labels.size(0); correct_val += (predicted == labels).sum().item()
             epoch_val_loss = running_val_loss / total_val if total_val > 0 else 0
@@ -478,13 +445,13 @@ if model is not None and optimizer is not None and criterion is not None:
         else:
             history['val_loss'].append(float('nan')); history['val_acc'].append(float('nan'))
             print(f"Epoch [{epoch+1}/{NUM_EPOCHS}] - Train Loss: {epoch_train_loss:.4f}, Acc: {epoch_train_acc:.4f} | (No Validation)")
-            best_model_state = model.state_dict() # Save last if no validation
+            best_model_state = model.state_dict()
 
     end_time = time.time()
     print(f"\n--- Training Finished ---"); print(f"Total Training Time: {end_time - start_time:.2f} seconds")
 
-    # --- Save the model ---
-    SAVED_MODEL_PATH = "geophone_model_3class_spec_delta_cnn2d.pth" # New name
+    # --- Save the Fine-tuned MobileNet model ---
+    SAVED_MODEL_PATH = "geophone_model_3class_mobilenetv3s_final.pth" # New name
     if best_model_state is not None:
         if run_validation and best_val_loss != float('inf'): print(f"Saving best model state (Val Loss: {best_val_loss:.4f}) to {SAVED_MODEL_PATH}")
         else: print(f"Saving last model state to {SAVED_MODEL_PATH}")
@@ -494,21 +461,21 @@ if model is not None and optimizer is not None and criterion is not None:
 else: print("Skipping Training loop as model could not be instantiated."); SAVED_MODEL_PATH = None
 
 
-# --- Load the saved model for evaluation ---
+# --- Load the saved Fine-tuned MobileNet model for evaluation ---
 if SAVED_MODEL_PATH and os.path.exists(SAVED_MODEL_PATH):
-    print(f"\n--- Loading Saved Model from {SAVED_MODEL_PATH} for Evaluation ---")
-    if 'INPUT_HEIGHT' not in locals() or 'INPUT_WIDTH' not in locals(): # Recalculate dims
-         if len(test_dataset) > 0: first_spec,_,_ = test_dataset[0]; INPUT_HEIGHT=first_spec.shape[1]; INPUT_WIDTH=first_spec.shape[2]
-         else: print("Cannot determine input dimensions."); exit()
-    # --- !!! Instantiate the Delta model !!! ---
-    eval_model = Simple2DCNN_3Class_Delta(num_classes=len(ALL_CLASSES), input_height=INPUT_HEIGHT, input_width=INPUT_WIDTH, dropout_rate=DROPOUT_RATE)
-    # -----------------------------------------
-    try: eval_model.load_state_dict(torch.load(SAVED_MODEL_PATH, map_location=DEVICE)); eval_model.to(DEVICE); eval_model.eval(); print("Model loaded.")
+    print(f"\n--- Loading Saved MobileNetV3 Model from {SAVED_MODEL_PATH} for Evaluation ---")
+    # Re-instantiate the model architecture and modify the head
+    eval_model = models.mobilenet_v3_small(weights=None) # Load architecture without pre-trained weights now
+    num_ftrs = eval_model.classifier[3].in_features
+    eval_model.classifier[3] = nn.Linear(num_ftrs, len(ALL_CLASSES))
+    try:
+        eval_model.load_state_dict(torch.load(SAVED_MODEL_PATH, map_location=DEVICE)); eval_model.to(DEVICE); eval_model.eval()
+        print("Model loaded successfully.")
     except Exception as e: print(f"Error loading model: {e}."); eval_model = None
 else: print("No saved model found."); eval_model = None
 
-# --- Evaluation on Test Set (3 Classes, using 2D CNN with Deltas) ---
-print(f"\n--- Evaluating on Test Set (3 Classes, Spectrograms + Deltas) ---")
+# --- Evaluation on Test Set (3 Classes, using Fine-tuned MobileNetV3) ---
+print(f"\n--- Evaluating on Test Set (3 Classes, MobileNetV3) ---")
 if len(test_dataset) == 0: print("ERROR: Test set is empty.")
 elif eval_model is None: print("ERROR: Model not loaded.")
 else:
@@ -516,6 +483,10 @@ else:
     with torch.no_grad():
         for batch_data in test_loader:
             inputs, labels, _ = batch_data # Dataset yields spec+deltas, label, source
+            # --- !!! Ensure input has 3 channels for MobileNet !!! ---
+            # The dataset should already return (B, 3, H, W)
+            # If not, you might need: inputs = inputs.repeat(1, 3, 1, 1) if inputs.shape[1]==1 else inputs
+            # -------------------------------------------------------
             inputs, labels = inputs.to(DEVICE), labels.to(DEVICE); outputs = eval_model(inputs)
             _, predicted = torch.max(outputs.data, 1); all_preds_idx.extend(predicted.cpu().numpy()); all_true_idx.extend(labels.cpu().numpy())
     if not all_true_idx: print("No samples processed.")
@@ -526,7 +497,7 @@ else:
         print("\nClassification Report (Test Set):"); print(report)
         plt.figure(figsize=(7, 6)); cm = confusion_matrix(all_true_idx, all_preds_idx, labels=np.arange(len(ALL_CLASSES)))
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=label_encoder_3class.classes_, yticklabels=label_encoder_3class.classes_)
-        plt.title('Confusion Matrix (3 Classes - Spec+Delta Model)'); plt.xlabel('Predicted Label'); plt.ylabel('True Label'); plt.show()
+        plt.title('Confusion Matrix (3 Classes - MobileNetV3)'); plt.xlabel('Predicted Label'); plt.ylabel('True Label'); plt.show()
 
 # --- Final Visualizations ---
 def plot_training_history_adj(history):
