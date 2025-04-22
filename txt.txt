@@ -3,9 +3,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import os
 import glob
-import random
-from tqdm import tqdm # For progress bar during loading
-import itertools # Optional: for generating all pairs automatically
+from tqdm import tqdm
+from scipy import signal as sp_signal # חשוב לייבוא scipy.signal לסינון ו-PSD
 
 # --- Configuration ---
 # !!! **חשוב מאוד** שנה את הערכים האלה בהתאם לנתונים שלך !!!
@@ -13,278 +12,203 @@ DATA_DIR = 'data'  # התיקייה שמכילה את קבצי ה-CSV
 SAMPLING_RATE = 1000 # Hz (קצב הדגימה של הגאופונים)
 # --------------------
 
+# --- פונקציות טעינה וקורלציה (מהקוד הקודם, ללא שינוי מהותי) ---
 def get_label_from_filename(filename):
-    """מחלץ תווית משם הקובץ. נותן עדיפות ל-'nothing'."""
     filename_lower = filename.lower()
-    # סדר הבדיקה חשוב למנוע זיהוי שגוי (למשל, 'human_nothing' כ-'human')
     if 'nothing' in filename_lower: return 'nothing'
     elif 'human' in filename_lower or 'man' in filename_lower: return 'human'
     elif 'car' in filename_lower: return 'car'
-    # ניתן להוסיף עוד תנאים אם יש קטגוריות נוספות
-    else:
-        # You might want to comment this out if you have many unrelated files
-        # print(f"Warning: Could not determine label for filename: {filename}")
-        return None # לא נמצאה תווית מוכרת
+    else: return None
 
-# --- 1. טעינת נתונים ואחסון במבנה מילוני מקונן ---
-data_structured = {} # key: filename, value: {col_index: signal_array}
-labels_by_filename = {} # key: filename, value: label
-all_source_keys = [] # רשימה של כל המפתחות הייחודיים: (filename, col_index)
+data_structured = {}
+labels_by_filename = {}
+all_source_keys = []
 
 csv_files = glob.glob(os.path.join(DATA_DIR, '*.csv'))
 print(f"Found {len(csv_files)} CSV files in '{DATA_DIR}'.")
-
 print("Processing CSV files...")
 for filepath in tqdm(csv_files, desc="Loading Data", unit="file"):
     filename = os.path.basename(filepath)
     label = get_label_from_filename(filename)
-    if label is None:
-        continue # דלג על קבצים ללא תווית מזוהה
-
+    if label is None: continue
     try:
-        # בדוק אם הקובץ ריק לפני הקריאה
-        if os.path.getsize(filepath) == 0:
-            # tqdm.write(f"Skipping empty file: {filename}") # Optional: uncomment for more verbose output
-            continue
+        if os.path.getsize(filepath) == 0: continue
         df = pd.read_csv(filepath, header=None)
-        # בדוק אם ה-DataFrame ריק אחרי הקריאה
-        if df.empty:
-            # tqdm.write(f"Skipping file with no data columns: {filename}") # Optional
-            continue
-
-        # אתחל מילון פנימי לקובץ הנוכחי
+        if df.empty: continue
         data_structured[filename] = {}
         labels_by_filename[filename] = label
-
         for i, col_name in enumerate(df.columns):
-            # ודא שהעמודה מכילה נתונים מספריים לפני ההמרה
             if pd.api.types.is_numeric_dtype(df[col_name]):
-                # המר ל-float64 ליתר ביטחון, טפל בערכים חסרים אם יש (למשל, מילוי ב-0)
                 sensor_series = df[col_name].fillna(0).values.astype(np.float64)
-                # בדוק אם הסדרה אינה קצרה מדי או ריקה
-                if len(sensor_series) >= 10: # אורך מינימלי סביר
+                if len(sensor_series) >= 10:
                      data_structured[filename][i] = sensor_series
-                     all_source_keys.append((filename, i)) # שמירת מפתח ייחודי לכל אות
-                # else:
-                #     tqdm.write(f"Skipping very short series (len={len(sensor_series)}) in {filename}, col {i}") # Optional
-            # else:
-            #      tqdm.write(f"Skipping non-numeric column {i} in {filename}") # Optional
-
-    except pd.errors.EmptyDataError:
-        tqdm.write(f"Error reading {filename}: File seems empty or wrongly formatted.")
+                     all_source_keys.append((filename, i))
     except Exception as e:
-        tqdm.write(f"Error processing {filename}, column {i if 'i' in locals() else 'N/A'}: {e}")
+        tqdm.write(f"Error processing {filename}: {e}")
 
-print(f"\nFinished loading data. Total unique signals (file, column): {len(all_source_keys)}")
+print(f"\nFinished loading data. Total unique signals: {len(all_source_keys)}")
 if not all_source_keys:
      print("No data loaded successfully. Exiting.")
      exit()
-
 print("\nAvailable data structure summary:")
 for fname, cols_dict in data_structured.items():
     print(f"- File: {fname} (Label: {labels_by_filename[fname]}), Columns loaded: {list(cols_dict.keys())}")
 
-
-# --- 2. פונקציות עזר לקרוס-קורלציה (זהות לקוד הקודם) ---
 def calculate_cross_correlation(sig1, sig2, sampling_rate):
-    """מחשבת קרוס-קורלציה מנורמלת בין שני אותות."""
     sig1 = np.asarray(sig1, dtype=np.float64)
     sig2 = np.asarray(sig2, dtype=np.float64)
-    # Handle NaN/Inf values that might arise from loading or previous steps
-    sig1 = np.nan_to_num(sig1, nan=0.0, posinf=0.0, neginf=0.0)
-    sig2 = np.nan_to_num(sig2, nan=0.0, posinf=0.0, neginf=0.0)
-
-    # Basic check for empty signals
-    if len(sig1) == 0 or len(sig2) == 0:
-        # print(f"Warning: Empty signal detected in comparison. Skipping.")
-        return None, None, None, None
-
-    # Normalize signals (zero mean, unit variance)
+    sig1 = np.nan_to_num(sig1); sig2 = np.nan_to_num(sig2)
+    if len(sig1) == 0 or len(sig2) == 0: return None, None, None, None
     mean1, std1 = np.mean(sig1), np.std(sig1)
     mean2, std2 = np.mean(sig2), np.std(sig2)
-
-    # Avoid division by zero if standard deviation is very small (constant signal)
     sig1_norm = np.zeros_like(sig1) if std1 < 1e-9 else (sig1 - mean1) / std1
     sig2_norm = np.zeros_like(sig2) if std2 < 1e-9 else (sig2 - mean2) / std2
-
-    # Calculate cross-correlation using numpy.correlate
     correlation = np.correlate(sig1_norm, sig2_norm, mode='full')
-
-    # Calculate lags in samples and milliseconds
     n1, n2 = len(sig1_norm), len(sig2_norm)
     lags_samples = np.arange(-(n2 - 1), n1)
     lags_ms = lags_samples * (1000.0 / sampling_rate)
-
-    # Normalize the correlation output to the range [-1, 1]
-    # Standard normalization factor: sqrt(sum(sig1_norm^2) * sum(sig2_norm^2))
-    # Since sig1_norm and sig2_norm have std=1 (or 0), sum(sig_norm^2) is approx N (or 0)
-    # A robust normalization factor related to the length can also be considered,
-    # but the theoretical normalization is preferred.
     norm_factor = np.sqrt(np.sum(sig1_norm**2) * np.sum(sig2_norm**2))
-    if norm_factor < 1e-9: # Avoid division by zero if one signal was constant zero
-        normalized_correlation = np.zeros_like(correlation)
-    else:
-        normalized_correlation = correlation / norm_factor
-
-    # Check if correlation result is valid
-    if len(normalized_correlation) == 0:
-         # print(f"Warning: Correlation result is empty. Skipping.")
-        return None, None, None, None
-
-    # Find the peak (maximum absolute correlation) and its lag
+    if norm_factor < 1e-9: normalized_correlation = np.zeros_like(correlation)
+    else: normalized_correlation = correlation / norm_factor
+    if len(normalized_correlation) == 0: return None, None, None, None
     peak_index = np.argmax(np.abs(normalized_correlation))
     peak_lag_ms = lags_ms[peak_index]
-    peak_value = normalized_correlation[peak_index] # The actual value at the peak (can be negative)
-
-    # Sanity check on lag index
-    if peak_index < 0 or peak_index >= len(lags_ms):
-       print(f"Warning: Invalid peak index {peak_index} for lags length {len(lags_ms)}. Skipping peak info.")
-       peak_lag_ms, peak_value = None, None # Reset if index is out of bounds
-
-
+    peak_value = normalized_correlation[peak_index]
+    if peak_index < 0 or peak_index >= len(lags_ms): peak_lag_ms, peak_value = None, None
     return lags_ms, normalized_correlation, peak_lag_ms, peak_value
 
-
 def plot_cross_correlation(lags_ms, correlation, peak_lag_ms, peak_value, title):
-    """מציגה גרף של הקרוס-קורלציה עם סימון הפיק."""
-    if lags_ms is None or correlation is None:
-         # print(f"Skipping plot for '{title}' due to calculation error or empty data.")
-         return # Avoid plotting empty graphs
-    plt.figure(figsize=(12, 5)) # הגדלת הגרף
+    if lags_ms is None or correlation is None: return
+    plt.figure(figsize=(12, 5))
     plt.plot(lags_ms, correlation, label='Cross-correlation value', linewidth=1.5)
-    # סמן את הפיק בבירור (only if peak info is valid)
     if peak_lag_ms is not None and peak_value is not None:
-        plt.scatter([peak_lag_ms], [peak_value], color='red', s=100, zorder=5,
-                    label=f'Peak: {peak_value:.2f} at {peak_lag_ms:.1f} ms')
-    else:
-         plt.text(0.05, 0.9, "Peak info unavailable", transform=plt.gca().transAxes, color='red')
+        plt.scatter([peak_lag_ms], [peak_value], color='red', s=100, zorder=5, label=f'Peak: {peak_value:.2f} at {peak_lag_ms:.1f} ms')
+    else: plt.text(0.05, 0.9, "Peak info unavailable", transform=plt.gca().transAxes, color='red')
+    plt.axhline(0, color='grey', linestyle='--', linewidth=0.7); plt.axvline(0, color='grey', linestyle='--', linewidth=0.7)
+    plt.title(title, fontsize=12); plt.xlabel('Lag (ms)', fontsize=12); plt.ylabel('Normalized Cross-correlation [-1, 1]', fontsize=12)
+    plt.ylim([-1.1, 1.1]); plt.legend(); plt.grid(True, linestyle=':'); plt.tight_layout()
 
-    plt.axhline(0, color='grey', linestyle='--', linewidth=0.7) # קו אפס
-    plt.axvline(0, color='grey', linestyle='--', linewidth=0.7) # קו לאג אפס
-    plt.title(title, fontsize=12) # הקטנת פונט לכותרות ארוכות יותר
-    plt.xlabel('Lag (ms)', fontsize=12)
-    plt.ylabel('Normalized Cross-correlation [-1, 1]', fontsize=12)
-    plt.ylim([-1.1, 1.1]) # ודא שהסקאלה נכונה לקורלציה מנורמלת
-    plt.legend()
-    plt.grid(True, linestyle=':')
-    plt.tight_layout()
+# --- חדש: פונקציות עזר לניתוח ספקטרלי וסינון ---
+def plot_signal(signal, time_vector, title, ax=None):
+    """מציגה גרף של אות בזמן"""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(time_vector, signal, linewidth=1)
+    ax.set_title(title, fontsize=12)
+    ax.set_xlabel("Time (s)", fontsize=10)
+    ax.set_ylabel("Amplitude", fontsize=10)
+    ax.grid(True, linestyle=':')
+    if ax is None: plt.tight_layout()
 
-# --- 3. הגדרת זוגות להשוואה וביצוע הניתוח ---
-print(f"\n--- Starting Cross-Correlation Analysis (Sampling Rate: {SAMPLING_RATE} Hz) ---")
+def plot_psd(signal, fs, title, ax=None, max_freq=None):
+    """מחשבת ומציגה Power Spectral Density (PSD)"""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 5))
+    # שימוש ב-Welch's method להערכת PSD יציבה יותר
+    frequencies, psd = sp_signal.welch(signal, fs, nperseg=fs*2, noverlap=fs, scaling='density') # Adjust nperseg/noverlap as needed
+    ax.semilogy(frequencies, psd, linewidth=1) # Use log scale for Y axis
+    ax.set_title(title, fontsize=12)
+    ax.set_xlabel('Frequency (Hz)', fontsize=10)
+    ax.set_ylabel('PSD (Unit^2/Hz)', fontsize=10) # Adjust unit based on signal
+    if max_freq:
+         ax.set_xlim(0, max_freq)
+    ax.grid(True, which='both', linestyle=':') # Grid for both major and minor ticks
+    if ax is None: plt.tight_layout()
 
-# !!! **חשוב מאוד** שנה את הקטע הזה כדי להגדיר אילו השוואות לבצע !!!
-# הגדר את שמות הקבצים והעמודות הספציפיים שברצונך להשוות.
-# המפתח לכל אות הוא tuple: (filename, column_index)
+def apply_notch_filter(data, noisy_freq, quality_factor, fs):
+    """מחילה מסנן Notch על האות"""
+    if noisy_freq <= 0 or noisy_freq >= fs/2:
+         print(f"Warning: Invalid notch frequency {noisy_freq} Hz for sampling rate {fs} Hz. Skipping filtering.")
+         return data
+    # Design notch filter
+    b, a = sp_signal.iirnotch(noisy_freq, quality_factor, fs)
+    # Apply filter using filtfilt for zero phase distortion
+    filtered_data = sp_signal.filtfilt(b, a, data)
+    return filtered_data
 
-comparisons_to_make = [] # רשימה של זוגות-מפתחות להשוואה
+# --- ניתוח ספציפי: אדם מול שקט (גאופון 0) ---
 
-# --- דוגמאות איך להוסיף השוואות לרשימה ---
+print("\n--- Analyzing Human vs. Nothing (Column 0) ---")
 
-# א. מציאת שמות קבצים רלוונטיים באופן אוטומטי (דרך גמישה)
+# 1. בחירת האותות הרלוונטיים
 human_file = next((f for f in data_structured if 'human' in f.lower() and 'nothing' not in f.lower()), None)
-car_file = next((f for f in data_structured if 'car' in f.lower() and 'nothing' not in f.lower()), None)
 nothing_file = next((f for f in data_structured if 'nothing' in f.lower()), None)
 
-print("\nAttempting to find relevant files:")
-print(f"- Human file found: {human_file}")
-print(f"- Car file found: {car_file}")
-print(f"- Nothing file found: {nothing_file}")
+signal_human_col0 = None
+signal_nothing_col0 = None
+time_vector_human = None
+time_vector_nothing = None
 
-# ב. הגדרה ידנית של השוואות (החלף בשמות הקבצים והעמודות האמיתיים שלך!)
-
-# דוגמה 1: השוואת אותו גאופון (נניח עמודה 0) בין אירועים שונים
-if human_file and car_file and 0 in data_structured.get(human_file,{}) and 0 in data_structured.get(car_file,{}):
-    key_human_0 = (human_file, 0)
-    key_car_0 = (car_file, 0)
-    comparisons_to_make.append( (key_human_0, key_car_0) ) # אדם מול רכב (גאופון 0)
-
-if human_file and nothing_file and 0 in data_structured.get(human_file,{}) and 0 in data_structured.get(nothing_file,{}):
-    key_human_0 = (human_file, 0)
-    key_nothing_0 = (nothing_file, 0)
-    comparisons_to_make.append( (key_human_0, key_nothing_0) ) # אדם מול שקט (גאופון 0)
-
-if car_file and nothing_file and 0 in data_structured.get(car_file,{}) and 0 in data_structured.get(nothing_file,{}):
-     key_car_0 = (car_file, 0)
-     key_nothing_0 = (nothing_file, 0)
-     comparisons_to_make.append( (key_car_0, key_nothing_0) ) # רכב מול שקט (גאופון 0)
-
-# דוגמה 2: השוואת גאופונים שונים (נניח 0 ו-1) באותו אירוע
-if human_file and 0 in data_structured.get(human_file,{}) and 1 in data_structured.get(human_file,{}):
-    key_human_0 = (human_file, 0)
-    key_human_1 = (human_file, 1)
-    comparisons_to_make.append( (key_human_0, key_human_1) ) # אירוע אדם: גאופון 0 מול 1
-
-if car_file and 0 in data_structured.get(car_file,{}) and 1 in data_structured.get(car_file,{}):
-    key_car_0 = (car_file, 0)
-    key_car_1 = (car_file, 1)
-    comparisons_to_make.append( (key_car_0, key_car_1) ) # אירוע רכב: גאופון 0 מול 1
-
-# דוגמה 3: השוואת גאופונים שונים בין אירועים שונים
-if human_file and car_file and 0 in data_structured.get(human_file,{}) and 1 in data_structured.get(car_file,{}):
-    key_human_0 = (human_file, 0)
-    key_car_1 = (car_file, 1)
-    comparisons_to_make.append( (key_human_0, key_car_1) ) # אדם/גאופון 0 מול רכב/גאופון 1
-
-
-# --- אפשרות: השווה את כל הזוגות האפשריים (זהירות: עלול ליצור המון גרפים!) ---
-# if len(all_source_keys) > 1 and len(all_source_keys) < 50: # Add a limit to avoid too many plots
-#     print(f"\nGenerating comparisons for all {len(all_source_keys)} signals (total {len(list(itertools.combinations(all_source_keys, 2)))} pairs). This might take a while and create many plots.")
-#     comparisons_to_make = list(itertools.combinations(all_source_keys, 2))
-# else:
-#     print(f"\nNot generating all pairs automatically ({len(all_source_keys)} signals found). Please define specific pairs in 'comparisons_to_make'.")
-
-
-# --- 4. הרצת ההשוואות שהוגדרו ---
-if not comparisons_to_make:
-    print("\nNo comparisons were defined in 'comparisons_to_make'. Please edit the script to specify which signals to compare.")
+if human_file and 0 in data_structured.get(human_file, {}):
+    signal_human_col0 = data_structured[human_file][0]
+    time_vector_human = np.arange(len(signal_human_col0)) / SAMPLING_RATE
+    print(f"Found Human signal: {human_file}, Column 0, Length={len(signal_human_col0)}")
 else:
-    print(f"\nRunning {len(comparisons_to_make)} specified comparisons...")
-    plots_generated = 0
-    # Use tqdm for the comparison loop as well if there are many comparisons
-    for key1, key2 in tqdm(comparisons_to_make, desc="Comparing Signals"):
-        file1, col1 = key1
-        file2, col2 = key2
+    print("Human signal (Column 0) not found.")
 
-        # ודא שהמפתחות עדיין קיימים ושהאותות אינם ריקים
-        if file1 not in data_structured or col1 not in data_structured[file1] or \
-           file2 not in data_structured or col2 not in data_structured[file2]:
-            tqdm.write(f"Skipping comparison: Data missing for {key1} or {key2}")
-            continue
+if nothing_file and 0 in data_structured.get(nothing_file, {}):
+    signal_nothing_col0 = data_structured[nothing_file][0]
+    time_vector_nothing = np.arange(len(signal_nothing_col0)) / SAMPLING_RATE
+    print(f"Found Nothing signal: {nothing_file}, Column 0, Length={len(signal_nothing_col0)}")
+else:
+    print("Nothing signal (Column 0) not found.")
 
-        signal1 = data_structured[file1][col1]
-        signal2 = data_structured[file2][col2]
+# המשך רק אם שני האותות נמצאו
+if signal_human_col0 is not None and signal_nothing_col0 is not None:
 
-        # Check again for empty signals after retrieval
-        if len(signal1) == 0 or len(signal2) == 0:
-            tqdm.write(f"Skipping comparison: Empty signal for {key1} or {key2}")
-            continue
+    # 2. ניתוח לפני סינון
+    print("\n--- Analysis BEFORE Filtering ---")
+    fig_before, axs_before = plt.subplots(2, 2, figsize=(15, 10))
+    fig_before.suptitle('Analysis BEFORE Filtering (Human vs Nothing - Col 0)', fontsize=16)
 
-        lags, corr, peak_lag, peak_val = calculate_cross_correlation(signal1, signal2, SAMPLING_RATE)
+    # הצגת אותות בזמן
+    plot_signal(signal_human_col0, time_vector_human, f"Original Human Signal ({human_file} Col0)", ax=axs_before[0, 0])
+    plot_signal(signal_nothing_col0, time_vector_nothing, f"Original Nothing Signal ({nothing_file} Col0)", ax=axs_before[0, 1])
 
-        # יצירת כותרת מפורטת
-        label1 = labels_by_filename.get(file1, 'Unknown') # Use .get for safety
-        label2 = labels_by_filename.get(file2, 'Unknown')
-        # Shorten filename in title if too long
-        f1_short = file1 if len(file1) < 25 else file1[:10] + "..." + file1[-10:]
-        f2_short = file2 if len(file2) < 25 else file2[:10] + "..." + file2[-10:]
-        title = f"Corr: [{label1}@{f1_short}_Col{col1}] vs [{label2}@{f2_short}_Col{col2}]"
+    # הצגת PSD
+    # הגבל את תצוגת התדרים לתחום מעניין (למשל, עד 200Hz) כדי לראות טוב יותר רעשי רשת
+    plot_psd(signal_human_col0, SAMPLING_RATE, "PSD - Original Human", ax=axs_before[1, 0], max_freq=200)
+    plot_psd(signal_nothing_col0, SAMPLING_RATE, "PSD - Original Nothing", ax=axs_before[1, 1], max_freq=200)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout
+    plt.show() # הצג את הגרפים האלה קודם
 
-        # Only attempt to plot if calculation was successful
-        if lags is not None:
-            plot_cross_correlation(lags, corr, peak_lag, peak_val, title)
-            plots_generated += 1
-            # Optional: Print results for each comparison
-            # if peak_lag is not None and peak_value is not None:
-            #    tqdm.write(f"* {key1} vs {key2}: Peak={peak_value:.3f} @ Lag={peak_lag:.1f} ms")
-            # else:
-            #    tqdm.write(f"* {key1} vs {key2}: Correlation calculated, but peak info invalid.")
+    # הצגת קרוס-קורלציה מקורית
+    lags, corr, peak_lag, peak_val = calculate_cross_correlation(signal_human_col0, signal_nothing_col0, SAMPLING_RATE)
+    plot_cross_correlation(lags, corr, peak_lag, peak_val, f"Cross-Correlation BEFORE Filtering\nHuman Col0 vs Nothing Col0")
+    if peak_val is not None: print(f"Peak Correlation BEFORE Filtering: {peak_val:.2f}")
+    plt.show() # הצג גם את זה
 
+    # 3. הגדרת פרמטרי סינון ויישום
+    # !!! **בדוק את גרפי ה-PSD!** אם אתה רואה פיק ברור ב-60Hz, שנה ל-60. !!!
+    NOISY_FREQ = 50.0  # Hz (התדר שזוהה ב-PSD להסרה)
+    QUALITY_FACTOR = 30.0 # גורם איכות למסנן Notch (ערך גבוה = חריץ צר יותר)
 
-    # --- 5. הצגת הגרפים ---
-    if plots_generated > 0:
-        print(f"\nGenerated {plots_generated} comparison plots. Displaying...")
-        plt.show()
-    else:
-        print("\nNo comparison plots were generated based on the specified pairs and available data.")
+    print(f"\n--- Applying Notch Filter at {NOISY_FREQ} Hz ---")
+    filtered_human_col0 = apply_notch_filter(signal_human_col0, NOISY_FREQ, QUALITY_FACTOR, SAMPLING_RATE)
+    filtered_nothing_col0 = apply_notch_filter(signal_nothing_col0, NOISY_FREQ, QUALITY_FACTOR, SAMPLING_RATE)
 
-print("\n--- Cross-Correlation Analysis Complete ---")
+    # --- 4. ניתוח אחרי סינון ---
+    print("\n--- Analysis AFTER Filtering ---")
+    fig_after, axs_after = plt.subplots(2, 2, figsize=(15, 10))
+    fig_after.suptitle(f'Analysis AFTER Notch Filter ({NOISY_FREQ} Hz) (Human vs Nothing - Col 0)', fontsize=16)
+
+    # הצגת אותות מסוננים בזמן
+    plot_signal(filtered_human_col0, time_vector_human, f"Filtered Human Signal ({human_file} Col0)", ax=axs_after[0, 0])
+    plot_signal(filtered_nothing_col0, time_vector_nothing, f"Filtered Nothing Signal ({nothing_file} Col0)", ax=axs_after[0, 1])
+
+    # הצגת PSD מסונן
+    plot_psd(filtered_human_col0, SAMPLING_RATE, "PSD - Filtered Human", ax=axs_after[1, 0], max_freq=200)
+    plot_psd(filtered_nothing_col0, SAMPLING_RATE, "PSD - Filtered Nothing", ax=axs_after[1, 1], max_freq=200)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout
+    plt.show() # הצג את הגרפים האלה
+
+    # הצגת קרוס-קורלציה *אחרי* סינון
+    lags_filt, corr_filt, peak_lag_filt, peak_val_filt = calculate_cross_correlation(filtered_human_col0, filtered_nothing_col0, SAMPLING_RATE)
+    plot_cross_correlation(lags_filt, corr_filt, peak_lag_filt, peak_val_filt, f"Cross-Correlation AFTER Notch Filter ({NOISY_FREQ} Hz)\nHuman Col0 vs Nothing Col0")
+    if peak_val_filt is not None: print(f"Peak Correlation AFTER Filtering: {peak_val_filt:.2f}")
+    plt.show() # הצג את הגרף הסופי
+
+else:
+    print("\nCould not perform detailed analysis because one or both required signals (human col0, nothing col0) were not found.")
+
+print("\n--- Analysis Script Complete ---")
