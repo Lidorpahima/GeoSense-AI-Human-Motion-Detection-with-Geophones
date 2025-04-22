@@ -31,7 +31,7 @@ print("--- Starting Full Pipeline ---")
 # =============================================================================
 # --- 1. תצורה (Configuration) ---
 # =============================================================================
-DATA_DIR = 'data'                  # Directory containing the CSV files
+DATA_DIR = 'DATATEST'                  # Directory containing the CSV files
 SAMPLING_RATE = 1000               # Hz (Sampling rate of the geophones)
 PROBLEM_CHANNELS = {0}             # Set of problematic channel indices (identified previously)
 PLOT_SAVE_DIR = "output_plots"     # Directory to save analysis plots
