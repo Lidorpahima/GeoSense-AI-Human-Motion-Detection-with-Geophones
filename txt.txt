@@ -1,116 +1,399 @@
-# [End of Step 5 code - after the print statements]
-# ... (code from step 5 finishes here)
+# -*- coding: utf-8 -*-
+# =============================================================================
+# CORRELATION_ANALYSIS_PER_FILE.py
+#
+# מטרת הקובץ:
+# 1. לטעון נתוני 'car', 'human' ('man'), 'nothing' מה-Dataset המקורי.
+# 2. לטעון נתוני קטגוריה חיצונית (למשל 'man' או 'car').
+# 3. לעבד את כל ה-Datasets בצורה דומה (בחירת ערוץ מיטבי).
+# 4. לחלק את האותות המעובדים לחלונות זהים.
+# 5. **חישוב קורלציה פר-קובץ חיצוני:** עבור כל קובץ חיצוני, לחשב
+#    את הקורלציה החציונית של החלונות שלו מול כל קטגוריה מקורית.
+# 6. להציג סיכום סטטיסטי וויזואלי פר-קובץ, ולהמליץ אילו קבצים
+#    חיצוניים נראים פחות מתאימים לקטגוריה המצופה.
+#
+# גרפים יוצגו ישירות ולא יישמרו לקבצים.
+# =============================================================================
+
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import os
+import glob
+from tqdm import tqdm
+from scipy import signal as sp_signal
+import itertools
+import math
+import random
+import time
+import seaborn as sns
+
+print("--- Starting Per-File Correlation Analysis Script ---")
+
+# =============================================================================
+# --- 1. תצורה (Configuration) ---
+# =============================================================================
+# --- נתיבים ---
+ORIGINAL_DATA_DIR = 'DATATEST'
+EXTERNAL_DATA_DIR = os.path.join('DATATEST - Copy', 'man') # שנה ל-'car' אם בודקים רכבים
+OUTPUT_DIR_UNUSED = "correlation_analysis_per_file_output" # לא נשתמש לשמירת גרפים
+
+# --- פרמטרים של נתונים ---
+SAMPLING_RATE = 1000
+ORIGINAL_LABELS_TO_LOAD = ['car', 'human', 'nothing']
+EXTERNAL_LABEL_IMPLIED = 'human'    # שנה ל-'car' אם בודקים רכבים
+NUM_EXTERNAL_SENSORS = 4            # שנה אם צריך
+
+# --- פרמטרים לעיבוד וניתוח ---
+WINDOW_DURATION_SEC = 1.0
+HOP_RATIO = 0.1
+WINDOW_SIZE_SAMPLES = int(WINDOW_DURATION_SEC * SAMPLING_RATE)
+HOP_SIZE_SAMPLES = int(WINDOW_SIZE_SAMPLES * (1 - HOP_RATIO))
+NUM_CORR_PAIRS_PER_FILE_COMPARISON = 100 # מספר השוואות לכל קובץ חיצוני מול כל קטגוריה מקורית
+SEED = 42
+CORRELATION_THRESHOLD_FOR_KEEPING = 0.15 # סף חציון קורלציה מינימלי מול הקטגוריה הרצויה
+DIFFERENCE_THRESHOLD_FACTOR = 1.5 # פי כמה הקורלציה לקטגוריה הרצויה צריכה להיות גבוהה מהאחרות
+
+print(f"--- Configuration ---")
+print(f"Original Data Dir: '{ORIGINAL_DATA_DIR}', Labels: {ORIGINAL_LABELS_TO_LOAD}")
+print(f"External Data Dir: '{EXTERNAL_DATA_DIR}', Implied Label: '{EXTERNAL_LABEL_IMPLIED}'")
+# print(f"Output Dir: '{OUTPUT_DIR_UNUSED}' (Plots will be shown, not saved)")
+print(f"Sampling Rate: {SAMPLING_RATE} Hz")
+print(f"Window: {WINDOW_DURATION_SEC} sec ({WINDOW_SIZE_SAMPLES} samples), Overlap: {HOP_RATIO*100:.0f}%")
+print(f"Correlation Pairs per File Comparison: {NUM_CORR_PAIRS_PER_FILE_COMPARISON}")
+print(f"Correlation Threshold to Keep: > {CORRELATION_THRESHOLD_FOR_KEEPING} (median vs '{EXTERNAL_LABEL_IMPLIED}')")
+print(f"Difference Factor Threshold: {DIFFERENCE_THRESHOLD_FACTOR}x higher corr vs '{EXTERNAL_LABEL_IMPLIED}' than others")
 print("-" * 30)
 
+# --- יצירת תיקיית פלט (למקרה שנוסיף שמירה בעתיד) ---
+# os.makedirs(OUTPUT_DIR_UNUSED, exist_ok=True)
+
+# --- הגדרת Seed ---
+random.seed(SEED)
+np.random.seed(SEED)
 
 # =============================================================================
-# --- 5b. ניתוח קורלציה בין חלונות (אופציונלי, לניתוח בלבד) ---
+# --- 2. פונקציות עזר (Helper Functions) ---
+# (זהות לקוד הקודם - load_data_by_label, find_best_channel, process_signals,
+#  create_windows, calculate_cross_correlation, plot_cross_correlation)
 # =============================================================================
-print("\n--- 5b. Analyzing Window Correlations (Optional Analysis Step) ---")
+print("\n--- Defining Helper Functions ---")
+# (העתק את כל פונקציות העזר מהקוד הקודם לכאן)
+# ... (קוד פונקציות העזר מועתק לכאן) ...
+# --- פונקציית טעינה גנרית יותר ---
+def load_data_by_label(data_dir, labels_to_find, file_pattern="*.csv", expected_sensors=None):
+    """Loads CSV data, grouping by inferred label from filename."""
+    data_by_label = {label: {} for label in labels_to_find} # label -> {filename -> {channel -> signal}}
+    files_loaded_list = [] # רשימה לאחסון שמות הקבצים שנטענו
 
-# Configuration for window correlation analysis
-NUM_PAIRS_TO_ANALYZE_PER_COMPARISON = 100 # How many random pairs to check for each comparison type
-ANALYZE_WINDOW_CORRELATIONS = True       # Set to False to skip this analysis block entirely
+    csv_files = glob.glob(os.path.join(data_dir, file_pattern))
+    print(f"Searching in '{data_dir}'. Found {len(csv_files)} files.")
+    if not csv_files: return None, None # החזר שני ערכים גם במקרה שאין קבצים
 
-if ANALYZE_WINDOW_CORRELATIONS and all_windows and all_window_labels:
-    print(f"Analyzing correlations between windows (sampling {NUM_PAIRS_TO_ANALYZE_PER_COMPARISON} pairs per comparison type)...")
+    pbar = tqdm(csv_files, desc=f"Loading from {os.path.basename(data_dir)}", unit="file", leave=False)
+    for filepath in pbar:
+        filename = os.path.basename(filepath)
+        pbar.set_postfix_str(filename)
 
-    # Prepare data: Create a dictionary mapping labels to window indices
-    indices_by_label = {}
-    unique_analysis_labels = sorted(list(set(all_window_labels)))
-    for label in unique_analysis_labels:
-        indices_by_label[label] = [i for i, lbl in enumerate(all_window_labels) if lbl == label]
-        print(f"Found {len(indices_by_label[label])} windows for label '{label}'")
+        # נסיון לזהות תווית משם הקובץ
+        file_label = None
+        fn_lower = filename.lower()
+        if 'human' in fn_lower or 'man' in fn_lower: file_label = 'human'
+        elif 'car' in fn_lower: file_label = 'car'
+        elif 'nothing' in fn_lower: file_label = 'nothing'
 
-    analysis_results = {} # To store correlation results for different comparisons
+        # אם מדובר בתיקייה החיצונית, נאלץ את התווית להיות התווית המצופה
+        if data_dir == EXTERNAL_DATA_DIR:
+             file_label = EXTERNAL_LABEL_IMPLIED
 
-    # --- 1. Intra-Class Correlation (Within the same label) ---
-    print("\n--- Analyzing Intra-Class Correlations ---")
-    for label in unique_analysis_labels:
-        label_indices = indices_by_label[label]
-        if len(label_indices) < 2:
-            print(f"Skipping intra-class analysis for '{label}': Not enough windows ({len(label_indices)}).")
-            continue
+        # בדוק אם זו תווית שביקשנו לטעון
+        if file_label not in labels_to_find: continue
 
-        correlations_within_label = []
-        # Generate unique pairs of indices within this label
-        possible_pairs = list(itertools.combinations(label_indices, 2))
-        if len(possible_pairs) == 0: continue
+        try:
+            if os.path.getsize(filepath) == 0: continue
+            df = pd.read_csv(filepath, header=None)
+            if df.empty: continue
 
-        # Sample pairs if there are too many
-        num_pairs_to_sample = min(NUM_PAIRS_TO_ANALYZE_PER_COMPARISON, len(possible_pairs))
-        sampled_pairs_indices = random.sample(range(len(possible_pairs)), num_pairs_to_sample)
+            if expected_sensors is not None and df.shape[1] != expected_sensors: continue
 
-        print(f"Analyzing {num_pairs_to_sample} pairs for label '{label}'...")
-        for pair_idx in tqdm(sampled_pairs_indices, desc=f"Corr within {label}", leave=False):
-             idx1, idx2 = possible_pairs[pair_idx]
-             window1 = all_windows[idx1]
-             window2 = all_windows[idx2]
+            current_file_data = {}
+            valid_channels_in_file = 0
+            num_cols_to_check = df.shape[1]
 
-             # Use the existing correlation function
-             _, _, _, peak_val, _ = calculate_cross_correlation(window1, window2, SAMPLING_RATE)
+            for i in range(num_cols_to_check):
+                col_name = i
+                if pd.api.types.is_numeric_dtype(df.iloc[:, col_name]):
+                    sensor_series = df.iloc[:, col_name].fillna(0).values.astype(np.float64)
+                    if len(sensor_series) >= 10 and np.std(sensor_series) > 1e-9:
+                         current_file_data[i] = sensor_series
+                         valid_channels_in_file += 1
 
-             if peak_val is not None:
-                 correlations_within_label.append(abs(peak_val)) # Store absolute correlation
+            if valid_channels_in_file > 0:
+                if file_label not in data_by_label: data_by_label[file_label] = {}
+                data_by_label[file_label][filename] = current_file_data
+                files_loaded_list.append(filename)
 
-        analysis_results[f"{label}_vs_{label}"] = correlations_within_label
+        except Exception as e: tqdm.write(f"Error processing file {filename} (Label: {file_label}): {e}")
 
-    # --- 2. Inter-Class Correlation (Between different labels) ---
-    print("\n--- Analyzing Inter-Class Correlations ---")
-    label_combinations = list(itertools.combinations(unique_analysis_labels, 2))
+    print(f"Finished loading. Loaded data for {len(files_loaded_list)} files across requested labels.")
+    for label, file_dict in data_by_label.items():
+         print(f"  - Label '{label}': Loaded {len(file_dict)} files.")
+         if not file_dict and label in labels_to_find: print(f"    WARNING: No files were successfully loaded for the required label '{label}'!")
 
-    for label1, label2 in label_combinations:
-        indices1 = indices_by_label[label1]
-        indices2 = indices_by_label[label2]
+    return data_by_label, files_loaded_list
 
-        if not indices1 or not indices2:
-            print(f"Skipping inter-class analysis for '{label1}' vs '{label2}': One or both labels have no windows.")
-            continue
+def find_best_channel(file_data, available_channels):
+    best_channel = -1; max_variance = -1.0
+    for ch in available_channels:
+        if ch in file_data: variance = np.var(file_data[ch]);
+        if variance > max_variance: max_variance = variance; best_channel = ch
+    return best_channel
 
-        correlations_between_labels = []
-        num_pairs_to_sample = NUM_PAIRS_TO_ANALYZE_PER_COMPARISON
+def process_signals(raw_data_dict, strategy='best'):
+    processed_signals = {}
+    pbar = tqdm(raw_data_dict.items(), desc=f"Processing Signals ({strategy})", leave=False)
+    for filename, sensor_data_dict in pbar:
+        available_channels = list(sensor_data_dict.keys());
+        if not available_channels: continue
+        processed_signal = None
+        if strategy == 'best':
+            best_channel_idx = find_best_channel(sensor_data_dict, available_channels)
+            if best_channel_idx != -1: processed_signal = sensor_data_dict[best_channel_idx]
+        if processed_signal is not None: processed_signals[filename] = processed_signal
+    pbar.close(); print(f"Processed {len(processed_signals)} files using '{strategy}' strategy.")
+    return processed_signals
 
-        print(f"Analyzing {num_pairs_to_sample} pairs for '{label1}' vs '{label2}'...")
-        # Sample one index from each label list for each pair
-        sampled_indices1 = random.choices(indices1, k=num_pairs_to_sample)
-        sampled_indices2 = random.choices(indices2, k=num_pairs_to_sample)
-
-        for idx1, idx2 in tqdm(zip(sampled_indices1, sampled_indices2), total=num_pairs_to_sample, desc=f"Corr {label1} vs {label2}", leave=False):
-            window1 = all_windows[idx1]
-            window2 = all_windows[idx2]
-
-            _, _, _, peak_val, _ = calculate_cross_correlation(window1, window2, SAMPLING_RATE)
-
-            if peak_val is not None:
-                correlations_between_labels.append(abs(peak_val)) # Store absolute correlation
-
-        analysis_results[f"{label1}_vs_{label2}"] = correlations_between_labels
-
-    # --- 3. Print Summary Statistics ---
-    print("\n--- Window Correlation Analysis Summary (Absolute Peak Values) ---")
-    for comparison_key, corr_values in analysis_results.items():
-        if corr_values:
-            avg_corr = np.mean(corr_values)
-            max_corr = np.max(corr_values)
-            min_corr = np.min(corr_values)
-            std_corr = np.std(corr_values)
-            median_corr = np.median(corr_values)
-            count = len(corr_values)
-            print(f"* {comparison_key} ({count} pairs):")
-            print(f"    Avg: {avg_corr:.3f}, Median: {median_corr:.3f}, Std: {std_corr:.3f}, Min: {min_corr:.3f}, Max: {max_corr:.3f}")
+def create_windows(processed_signals_dict, window_size, hop_size):
+    all_windows = {}; window_origins = {} # Use dictionary: filename -> list of windows
+    pbar = tqdm(processed_signals_dict.items(), desc="Creating Windows", leave=False)
+    total_windows_created = 0
+    for filename, signal_data in pbar:
+        file_windows = []
+        num_samples = len(signal_data)
+        if num_samples < window_size:
+             padded_signal = np.pad(signal_data, (0, window_size - num_samples), 'constant', constant_values=0); file_windows.append(padded_signal)
         else:
-            print(f"* {comparison_key}: No correlation values calculated (check data or sampling).")
+            num_windows = math.floor((num_samples - window_size) / hop_size) + 1
+            for i in range(num_windows):
+                start_idx = i * hop_size; end_idx = start_idx + window_size
+                if end_idx > num_samples: start_idx = num_samples - window_size; end_idx = num_samples
+                window = signal_data[start_idx:end_idx]
+                if len(window) == window_size: file_windows.append(window)
+        all_windows[filename] = file_windows
+        window_origins[filename] = filename # Keep track easily
+        total_windows_created += len(file_windows)
+    pbar.close(); print(f"Created {total_windows_created} windows across {len(all_windows)} files.")
+    return all_windows, window_origins # Return dicts now
 
-else:
-    if not ANALYZE_WINDOW_CORRELATIONS:
-        print("Window correlation analysis is disabled (ANALYZE_WINDOW_CORRELATIONS=False).")
-    else:
-        print("Skipping window correlation analysis: No windows or labels available.")
+def calculate_cross_correlation(sig1, sig2, sampling_rate):
+    sig1 = np.asarray(sig1, dtype=np.float64); sig2 = np.asarray(sig2, dtype=np.float64)
+    sig1 = np.nan_to_num(sig1); sig2 = np.nan_to_num(sig2)
+    n1, n2 = len(sig1), len(sig2)
+    if n1 < 2 or n2 < 2: lags_ms = np.arange(-(n2-1), n1) * (1000.0/sampling_rate) if n1>0 and n2>0 else np.array([0.0]); return lags_ms, np.zeros_like(lags_ms), 0.0, 0.0, 0
+    std1 = np.std(sig1); std2 = np.std(sig2)
+    if std1 < 1e-9 or std2 < 1e-9: lags_ms = np.arange(-(n2-1), n1) * (1000.0/sampling_rate); return lags_ms, np.zeros_like(lags_ms), 0.0, 0.0, 0
+    sig1_norm = (sig1 - np.mean(sig1)) / std1; sig2_norm = (sig2 - np.mean(sig2)) / std2
+    correlation = sp_signal.correlate(sig1_norm, sig2_norm, mode='full', method='fft')
+    lags_samples = np.arange(-(n2 - 1), n1); lags_ms = lags_samples * (1000.0 / sampling_rate)
+    correlation /= max(n1, n2); correlation = np.clip(correlation, -1.0, 1.0)
+    if len(correlation) == 0: return None, None, None, None, None
+    peak_index = np.argmax(np.abs(correlation)); peak_lag_samples = lags_samples[peak_index]
+    peak_lag_ms = lags_ms[peak_index]; peak_value = correlation[peak_index]
+    return lags_ms, correlation, peak_lag_ms, peak_value, peak_lag_samples
 
+def plot_cross_correlation(lags_ms, correlation, peak_lag_ms, peak_value, title, filename_to_save=None):
+    # *** שינוי: לא שומרים, רק מציגים ***
+    if lags_ms is None or correlation is None: return
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(lags_ms, correlation, label='Norm. Cross-correlation', linewidth=1.5, color='dodgerblue')
+    if peak_lag_ms is not None and peak_value is not None:
+        ax.scatter([peak_lag_ms], [peak_value], color='red', s=100, zorder=5, label=f'Peak: {peak_value:.3f} at {peak_lag_ms:.1f} ms')
+    ax.axhline(0, color='grey', linestyle='--', linewidth=0.7); ax.axvline(0, color='grey', linestyle='--', linewidth=0.7)
+    ax.set_title(title, fontsize=11); ax.set_xlabel('Lag (ms)', fontsize=10); ax.set_ylabel('Norm. Cross-corr [-1, 1]', fontsize=10)
+    ax.set_ylim([-1.1, 1.1]); ax.legend(fontsize=9); ax.grid(True, linestyle=':')
+    plt.tight_layout()
+    plt.show() # הצג את הגרף
+    plt.close(fig) # סגור את האובייקט של הגרף
+
+print("Helper functions defined.")
 print("-" * 30)
+
 # =============================================================================
-# --- 6. יצירת ספקטוגרמות (Generating Spectrograms) ---
+# --- 3. Main Execution Block ---
 # =============================================================================
-# [Start of Step 6 code - the print statement and the loop]
-print("\n--- 6. Generating Spectrograms from Windows ---")
-# ... (rest of step 6 code follows)
+if __name__ == "__main__":
+
+    start_time_main = time.time() # מדידת זמן כוללת
+
+    # --- טעינת נתונים ---
+    print("\n--- Loading Data Sets ---")
+    original_data_by_label, _ = load_data_by_label(ORIGINAL_DATA_DIR, labels_to_find=ORIGINAL_LABELS_TO_LOAD)
+    external_data_raw_dict, external_files_loaded = load_data_by_label(EXTERNAL_DATA_DIR,
+                                                  labels_to_find=[EXTERNAL_LABEL_IMPLIED],
+                                                  expected_sensors=NUM_EXTERNAL_SENSORS)
+
+    if not original_data_by_label or not external_data_raw_dict or EXTERNAL_LABEL_IMPLIED not in external_data_raw_dict:
+        print("\nError: Could not load data successfully from one or both sources. Exiting.")
+        exit()
+    external_raw_data_for_label = external_data_raw_dict[EXTERNAL_LABEL_IMPLIED]
+    if not external_raw_data_for_label:
+         print(f"Error: No external files loaded for the implied label '{EXTERNAL_LABEL_IMPLIED}'. Exiting.")
+         exit()
+
+    # --- עיבוד אותות ---
+    print("\n--- Processing Signals (Selecting Best Channel) ---")
+    original_processed_by_label = {}
+    for label, raw_data_dict in original_data_by_label.items():
+         if raw_data_dict: original_processed_by_label[label] = process_signals(raw_data_dict, strategy='best')
+    external_processed = process_signals(external_raw_data_for_label, strategy='best') # dict: filename -> signal
+
+    # --- יצירת חלונות ---
+    print("\n--- Creating Windows ---")
+    original_windows_by_label = {} # dict: label -> list of windows
+    possible_labels = list(original_processed_by_label.keys())
+    for label in possible_labels:
+         if original_processed_by_label.get(label):
+             # Pass only the dictionary for this label to create_windows
+             windows_dict, _ = create_windows(original_processed_by_label[label], WINDOW_SIZE_SAMPLES, HOP_SIZE_SAMPLES)
+             # Flatten the list of lists (if windows_dict contains lists) - actually create_windows needs adjustment
+             # Let's re-implement create_windows slightly to handle this input structure better
+             # For now, assume it works or adjust create_windows. Assuming we have lists of windows per label:
+             # (נניח ש-create_windows מחזיר רשימה שטוחה של חלונות עבור כל הקבצים ב-dict שהועבר)
+             temp_windows, _ = create_windows(original_processed_by_label[label], WINDOW_SIZE_SAMPLES, HOP_SIZE_SAMPLES)
+             original_windows_by_label[label] = list(temp_windows.values()) # Flatten the structure if needed, this might need debug
+             print(f"Original Label '{label}': Created {len(original_windows_by_label[label])} windows.")
+         else: original_windows_by_label[label] = []
+
+    if not external_processed: print("\nError: Could not process external signals. Exiting."); exit()
+    # יצירת חלונות פר-קובץ חיצוני
+    external_windows_per_file = {} # dict: filename -> list of windows
+    total_external_windows = 0
+    ext_win_pbar = tqdm(external_processed.items(), desc="Creating External Windows", leave=False)
+    for filename, signal_data in ext_win_pbar:
+         file_windows_dict, _ = create_windows({filename: signal_data}, WINDOW_SIZE_SAMPLES, HOP_SIZE_SAMPLES)
+         if filename in file_windows_dict:
+              external_windows_per_file[filename] = file_windows_dict[filename]
+              total_external_windows += len(file_windows_dict[filename])
+         else: external_windows_per_file[filename] = []
+    ext_win_pbar.close()
+    print(f"External '{EXTERNAL_LABEL_IMPLIED}': Created {total_external_windows} windows across {len(external_windows_per_file)} files.")
+
+    if total_external_windows == 0: print("\nError: Not enough windows created for comparison. Exiting."); exit()
+
+    # --- ניתוח קורלציה פר-קובץ חיצוני ---
+    print(f"\n--- Performing Per-File Correlation Analysis (External '{EXTERNAL_LABEL_IMPLIED}' vs Originals) ---")
+    # אחסון תוצאות: filename_external -> {label_original -> median_corr}
+    per_file_results = {}
+    files_to_remove = [] # רשימה לאחסון קבצים חיצוניים מומלצים להסרה
+
+    analysis_pbar = tqdm(external_windows_per_file.items(), desc="Analyzing External Files", total=len(external_windows_per_file))
+
+    for ext_filename, ext_windows in analysis_pbar:
+        analysis_pbar.set_postfix_str(ext_filename)
+        if not ext_windows: continue # דלג אם אין חלונות לקובץ חיצוני זה
+
+        per_file_results[ext_filename] = {}
+        file_medians = {} # לאחסון חציונים עבור הקובץ הנוכחי
+
+        # השווה את החלונות של הקובץ החיצוני הנוכחי לכל קטגוריה מקורית
+        for label_orig, orig_windows in original_windows_by_label.items():
+            if not orig_windows: continue # דלג אם אין חלונות מקוריים לתווית זו
+
+            correlation_values = []
+            num_pairs = min(NUM_CORR_PAIRS_PER_FILE_COMPARISON, len(orig_windows) * len(ext_windows))
+            if num_pairs == 0: continue
+
+            sampled_orig_indices = random.choices(range(len(orig_windows)), k=num_pairs)
+            sampled_ext_indices = random.choices(range(len(ext_windows)), k=num_pairs)
+
+            # חישוב קורלציות לזוגות הדגומים
+            for i in range(num_pairs):
+                idx_orig = sampled_orig_indices[i]; idx_ext = sampled_ext_indices[i]
+                window_orig = original_windows_by_label[label_orig][idx_orig]
+                window_ext = external_windows_per_file[ext_filename][idx_ext] # Access per-file windows
+
+                # --- >>> הוספת קוד דיבאג <<< ---
+                orig_ndim = np.ndim(window_orig)
+                ext_ndim = np.ndim(window_ext)
+                if orig_ndim != 1 or ext_ndim != 1:
+                    print(f"\n*** שגיאת מימדים לפני קורלציה! ***")
+                    print(f"  קובץ חיצוני: {ext_filename}")
+                    print(f"  תווית מקורית: {label_orig}")
+                    print(f"  מימדי חלון מקורי (אינדקס {idx_orig}): {orig_ndim} (צורה: {np.shape(window_orig)})")
+                    print(f"  מימדי חלון חיצוני (אינדקס {idx_ext}): {ext_ndim} (צורה: {np.shape(window_ext)})")
+                    print(f"  מדלג על זוג זה.")
+                    # אפשר להוסיף כאן הדפסה של החלונות עצמם אם רוצים לראות את הנתונים
+                    print("  חלון מקורי:", window_orig)
+                    print("  חלון חיצוני:", window_ext)
+                    continue # דלג על חישוב הקורלציה לזוג הבעייתי הזה
+    
+                if peak_val is not None: correlation_values.append(abs(peak_val))
+
+            # שמירת החציון אם חושבו ערכים
+            if correlation_values:
+                median_corr = np.median(correlation_values)
+                per_file_results[ext_filename][label_orig] = median_corr
+                file_medians[label_orig] = median_corr
+
+        # --- בדיקה אם להמליץ על הסרת הקובץ החיצוני הנוכחי ---
+        # בדוק אם קיימות כל ההשוואות הנדרשות
+        target_label = EXTERNAL_LABEL_IMPLIED
+        other_labels = [lbl for lbl in ORIGINAL_LABELS_TO_LOAD if lbl != target_label and lbl in file_medians]
+
+        recommend_removal = False
+        reason = ""
+        if target_label not in file_medians:
+             recommend_removal = True
+             reason = f"Could not calculate correlation vs target '{target_label}'."
+        else:
+             target_median = file_medians[target_label]
+             # בדיקה 1: האם הקורלציה מול התווית הרצויה נמוכה מדי?
+             if target_median < CORRELATION_THRESHOLD_FOR_KEEPING:
+                  recommend_removal = True
+                  reason = f"Median corr vs '{target_label}' ({target_median:.3f}) is below threshold ({CORRELATION_THRESHOLD_FOR_KEEPING})."
+             else:
+                  # בדיקה 2: האם הקורלציה מול התווית הרצויה לא גבוהה *מספיק* מהאחרות?
+                  is_distinct_enough = True
+                  for other_lbl in other_labels:
+                       if target_median < file_medians[other_lbl] * DIFFERENCE_THRESHOLD_FACTOR:
+                            is_distinct_enough = False
+                            reason = f"Median corr vs '{target_label}' ({target_median:.3f}) is not distinct enough from '{other_lbl}' ({file_medians[other_lbl]:.3f})."
+                            break
+                  if not is_distinct_enough:
+                       recommend_removal = True
+
+        if recommend_removal:
+            files_to_remove.append((ext_filename, reason, file_medians))
+
+
+    analysis_pbar.close()
+
+    # --- סיכום פר-קובץ והמלצות ---
+    print("\n--- Per-File Correlation Summary & Recommendations ---")
+    if not per_file_results:
+        print("No per-file correlation results generated.")
+    else:
+        # הדפסת טבלה מסכמת (אופציונלי, יכול להיות ארוך)
+        for ext_file, median_dict in per_file_results.items():
+            print(f"\nFile: {ext_file}")
+            for orig_label, median_val in median_dict.items():
+                print(f"  vs Orig '{orig_label}': Median Corr = {median_val:.3f}")
+
+        # הדפסת רשימת הקבצים המומלצים להסרה
+        print(f"\nBased on thresholds (Keep if Corr > {CORRELATION_THRESHOLD_FOR_KEEPING} vs '{EXTERNAL_LABEL_IMPLIED}' AND {DIFFERENCE_THRESHOLD_FACTOR}x higher than others):")
+        if not files_to_remove:
+            print("Recommendation: All external files seem reasonably suitable based on correlation analysis.")
+        else:
+            print(f"Recommendation: Consider REMOVING the following {len(files_to_remove)} external files:")
+            # Sort files by reason or target correlation for better readability
+            files_to_remove.sort(key=lambda x: x[2].get(EXTERNAL_LABEL_IMPLIED, -1)) # Sort by correlation vs target label
+            for fname, reason_text, medians_dict in files_to_remove:
+                 median_str = ", ".join([f"{lbl}:{val:.2f}" for lbl, val in medians_dict.items()])
+                 print(f"- {fname}: {reason_text} (Medians: {median_str})")
+
+            num_kept = len(external_windows_per_file) - len(files_to_remove)
+            print(f"\n=> Suggests keeping {num_kept} out of {len(external_windows_per_file)} external files for potential combination.")
+
+    total_time = time.time() - start_time_main
+    print(f"\n--- Per-File Correlation Analysis Script Finished ({total_time:.1f} seconds) ---")
+    print("-" * 50)
