@@ -1,901 +1,116 @@
-# -*- coding: utf-8 -*-
-# =============================================================================
-# Full Pipeline: Geophone Data Analysis, Preprocessing, Spectrograms, and CNN Training
-# =============================================================================
-
-import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
-import os
-import glob
-from tqdm import tqdm
-from scipy import signal as sp_signal
-import itertools
-import math
-import random
-import time
-
-# Deep Learning Imports
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, random_split
-from torchvision import transforms
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
-import seaborn as sns
-
-print("--- Starting Full Pipeline ---")
-
-# =============================================================================
-# --- 1. תצורה (Configuration) ---
-# =============================================================================
-DATA_DIR = 'DATATEST'                  # Directory containing the CSV files
-SAMPLING_RATE = 1000               # Hz (Sampling rate of the geophones)
-PROBLEM_CHANNELS = {0}             # Set of problematic channel indices (identified previously)
-PLOT_SAVE_DIR = "output_plots"     # Directory to save analysis plots
-MODEL_SAVE_PATH = "best_cnn_model.pth" # Path to save the best trained model
-PROBLEM_THRESHOLD = 0.8            # Correlation threshold to flag potential problems between event/nothing (Added)
-
-# Windowing Parameters
-WINDOW_DURATION_SEC = 5            # Length of each window in seconds
-HOP_RATIO = 0.5                    # Percentage overlap between windows (0.5 = 50%)
-WINDOW_SIZE_SAMPLES = int(WINDOW_DURATION_SEC * SAMPLING_RATE)
-HOP_SIZE_SAMPLES = int(WINDOW_SIZE_SAMPLES * HOP_RATIO)
-
-# Spectrogram Parameters
-NPERSEG = 256                      # Length of each segment (FFT window)
-NOVERLAP_RATIO = 0.75              # Overlap ratio for spectrogram windows
-NOVERLAP = int(NPERSEG * NOVERLAP_RATIO)
-WINDOW = 'hann'                    # Window type
-SCALING = 'density'                # 'density' for PSD, 'spectrum' for STFT magnitude
-MODE = 'psd'                       # Output mode ('psd', 'magnitude')
-EPSILON = 1e-10                    # Small value to prevent log(0)
-
-# Training Parameters
-SEED = 42                          # For reproducibility
-TEST_SIZE = 0.15                   # Proportion for the Test set
-VALIDATION_SIZE = 0.15             # Proportion for the Validation set (from non-Test data)
-BATCH_SIZE = 32                    # Number of samples per batch during training
-LEARNING_RATE = 0.0005             # Initial learning rate for the optimizer
-NUM_EPOCHS = 50                    # Maximum number of training epochs
-PATIENCE = 10                      # Early stopping patience (epochs without improvement)
-SHOW_ANALYSIS_PLOTS = False        # Set to True to show correlation plots interactively (can be many!)
-
-print(f"--- 1. Project Configuration ---")
-print(f"Data Directory: {DATA_DIR}")
-print(f"Sampling Rate: {SAMPLING_RATE} Hz")
-print(f"Problematic Channels Ignored: {PROBLEM_CHANNELS}")
-print(f"Problem Correlation Threshold: {PROBLEM_THRESHOLD}") # Added printout
-print(f"Window Duration: {WINDOW_DURATION_SEC} sec ({WINDOW_SIZE_SAMPLES} samples)")
-print(f"Window Hop Size: {HOP_SIZE_SAMPLES} samples ({HOP_RATIO*100:.0f}% overlap)")
-print(f"Spectrogram nperseg: {NPERSEG}, noverlap: {NOVERLAP}")
-print(f"Train/Val/Test Split: Train=~{1-TEST_SIZE-VALIDATION_SIZE*(1-TEST_SIZE):.0%}, Val=~{VALIDATION_SIZE*(1-TEST_SIZE):.0%}, Test=~{TEST_SIZE:.0%}")
-print(f"Batch Size: {BATCH_SIZE}, LR: {LEARNING_RATE}, Epochs: {NUM_EPOCHS}, Patience: {PATIENCE}")
+# [End of Step 5 code - after the print statements]
+# ... (code from step 5 finishes here)
 print("-" * 30)
 
-# Create directories if they don't exist
-os.makedirs(PLOT_SAVE_DIR, exist_ok=True)
-
-# Set Seed for reproducibility
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 # =============================================================================
-# --- 2. פונקציות עזר (Helper Functions) ---
+# --- 5b. ניתוח קורלציה בין חלונות (אופציונלי, לניתוח בלבד) ---
 # =============================================================================
-print("\n--- 2. Defining Helper Functions ---")
+print("\n--- 5b. Analyzing Window Correlations (Optional Analysis Step) ---")
 
-def get_label_from_filename(filename):
-    """Extracts label (category) from filename."""
-    filename_lower = filename.lower()
-    if 'nothing' in filename_lower:
-        return 'nothing'
-    elif 'human' in filename_lower or 'man' in filename_lower:
-        return 'human'
-    elif 'car' in filename_lower:
-        return 'car'
-    else:
-        return None
+# Configuration for window correlation analysis
+NUM_PAIRS_TO_ANALYZE_PER_COMPARISON = 100 # How many random pairs to check for each comparison type
+ANALYZE_WINDOW_CORRELATIONS = True       # Set to False to skip this analysis block entirely
 
-def load_data(data_dir):
-    """Loads CSV data from the directory and organizes it."""
-    data_structured = {}
-    labels_by_filename = {}
-    all_source_keys = []
-    csv_files = glob.glob(os.path.join(data_dir, '*.csv'))
-    print(f"\n--- 2a. Loading Data ---")
-    print(f"Found {len(csv_files)} CSV files in '{data_dir}'.")
-    if not csv_files:
-        print("Error: No CSV files found.")
-        exit()
-    for filepath in tqdm(csv_files, desc="Loading Files", unit="file", leave=False):
-        filename = os.path.basename(filepath)
-        label = get_label_from_filename(filename)
-        if label is None:
-            continue
-        try:
-            if os.path.getsize(filepath) == 0:
-                continue
-            df = pd.read_csv(filepath, header=None)
-            if df.empty:
-                continue
-            data_structured[filename] = {}
-            labels_by_filename[filename] = label
-            for i, col_name in enumerate(df.columns):
-                if pd.api.types.is_numeric_dtype(df[col_name]):
-                    sensor_series = df[col_name].fillna(0).values.astype(np.float64)
-                    # Ensure signal has enough length and variation
-                    if len(sensor_series) >= 10 and np.std(sensor_series) > 1e-9:
-                         data_structured[filename][i] = sensor_series
-                         all_source_keys.append((filename, i))
-        except Exception as e:
-            tqdm.write(f"Error processing {filename}: {e}")
+if ANALYZE_WINDOW_CORRELATIONS and all_windows and all_window_labels:
+    print(f"Analyzing correlations between windows (sampling {NUM_PAIRS_TO_ANALYZE_PER_COMPARISON} pairs per comparison type)...")
 
-    print(f"\nFinished loading. Total unique signals (channels) loaded: {len(all_source_keys)}")
-    if not all_source_keys:
-        print("Error: No valid signals loaded.")
-        exit()
+    # Prepare data: Create a dictionary mapping labels to window indices
+    indices_by_label = {}
+    unique_analysis_labels = sorted(list(set(all_window_labels)))
+    for label in unique_analysis_labels:
+        indices_by_label[label] = [i for i, lbl in enumerate(all_window_labels) if lbl == label]
+        print(f"Found {len(indices_by_label[label])} windows for label '{label}'")
 
-    print("\nSummary of Loaded Data:")
-    for fname, cols_dict in data_structured.items():
-        print(f"- File: {fname} (Label: {labels_by_filename[fname]}), Columns: {list(cols_dict.keys())}")
-    print("-" * 30)
-    return data_structured, labels_by_filename, all_source_keys
+    analysis_results = {} # To store correlation results for different comparisons
 
-def calculate_cross_correlation(sig1, sig2, sampling_rate):
-    """Calculates normalized cross-correlation and peak info."""
-    sig1 = np.asarray(sig1, dtype=np.float64)
-    sig2 = np.asarray(sig2, dtype=np.float64)
-    sig1 = np.nan_to_num(sig1) # Handle potential NaNs
-    sig2 = np.nan_to_num(sig2)
-
-    if len(sig1) < 2 or len(sig2) < 2:
-        return None, None, None, None, None
-
-    mean1, std1 = np.mean(sig1), np.std(sig1)
-    mean2, std2 = np.mean(sig2), np.std(sig2)
-
-    # If standard deviation is near zero (constant signal), handle gracefully
-    if std1 < 1e-9 or std2 < 1e-9 :
-        n1, n2 = len(sig1), len(sig2)
-        lags_samples = np.arange(-(n2 - 1), n1)
-        lags_ms = lags_samples * (1000.0 / sampling_rate)
-        return lags_ms, np.zeros(len(lags_ms)), 0.0, 0.0, 0 # Return zero correlation
-
-    # Normalize signals
-    sig1_norm = (sig1 - mean1) / std1
-    sig2_norm = (sig2 - mean2) / std2
-
-    # Calculate cross-correlation
-    correlation = np.correlate(sig1_norm, sig2_norm, mode='full')
-
-    # Calculate lags
-    n1, n2 = len(sig1_norm), len(sig2_norm)
-    lags_samples = np.arange(-(n2 - 1), n1)
-    lags_ms = lags_samples * (1000.0 / sampling_rate)
-
-    # Normalize the correlation result (optional but often done)
-    # Note: np.correlate with normalized inputs doesn't guarantee output range [-1, 1]
-    # A more robust normalization:
-    # norm_factor = np.sqrt(np.sum(sig1_norm**2) * np.sum(sig2_norm**2)) # Original way
-    norm_factor = len(sig1_norm) # Alternative normalization factor often used
-    if norm_factor < 1e-9:
-        normalized_correlation = np.zeros_like(correlation)
-    else:
-        # Ensure normalization doesn't exceed 1 due to potential floating point issues
-        normalized_correlation = correlation / norm_factor
-        normalized_correlation = np.clip(normalized_correlation, -1.0, 1.0)
-
-
-    if len(normalized_correlation) == 0:
-        return None, None, None, None, None
-
-    # Find peak
-    peak_index = np.argmax(np.abs(normalized_correlation))
-    peak_lag_ms = lags_ms[peak_index]
-    peak_value = normalized_correlation[peak_index]
-
-    # Ensure peak index is valid before calculating sample lag
-    if peak_index < 0 or peak_index >= len(lags_ms):
-         peak_lag_ms = None
-         peak_value = None
-         peak_lag_samples = 0
-    else:
-         peak_lag_samples = int(round(peak_lag_ms * sampling_rate / 1000.0)) if peak_lag_ms is not None else 0
-
-
-    return lags_ms, normalized_correlation, peak_lag_ms, peak_value, peak_lag_samples
-
-def plot_cross_correlation(lags_ms, correlation, peak_lag_ms, peak_value, title, filename_to_save=None):
-    """Plots cross-correlation, optionally saves to file."""
-    if lags_ms is None or correlation is None:
-        return # Cannot plot if data is missing
-
-    fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(lags_ms, correlation, label='Cross-correlation value', linewidth=1.5)
-
-    if peak_lag_ms is not None and peak_value is not None:
-        ax.scatter([peak_lag_ms], [peak_value], color='red', s=100, zorder=5, label=f'Peak: {peak_value:.2f} at {peak_lag_ms:.1f} ms')
-    else:
-        ax.text(0.05, 0.9, "Peak info unavailable", transform=ax.transAxes, color='red')
-
-    ax.axhline(0, color='grey', linestyle='--', linewidth=0.7)
-    ax.axvline(0, color='grey', linestyle='--', linewidth=0.7)
-    ax.set_title(title, fontsize=11)
-    ax.set_xlabel('Lag (ms)', fontsize=10)
-    ax.set_ylabel('Norm. Cross-corr [-1, 1]', fontsize=10)
-    ax.set_ylim([-1.1, 1.1])
-    ax.legend()
-    ax.grid(True, linestyle=':')
-    plt.tight_layout()
-
-    if filename_to_save:
-        try:
-            plt.savefig(filename_to_save)
-            # print(f"  Saved plot: {filename_to_save}") # Reduce verbosity
-        except Exception as e:
-            print(f"  Error saving plot {filename_to_save}: {e}")
-        plt.close(fig) # Close after saving
-    elif SHOW_ANALYSIS_PLOTS:
-        plt.show() # Show interactively only if requested
-    else:
-        plt.close(fig) # Close if not saving and not showing interactively
-
-def align_signal(signal_to_align, n_ref, lag_samples):
-    """Aligns a signal based on a given lag relative to a reference length."""
-    n_align = len(signal_to_align)
-    aligned_signal = np.zeros(n_ref) # Initialize with zeros
-
-    if lag_samples > 0: # signal_to_align starts LATER than ref
-        # Copy from `lag_samples` onwards in signal_to_align into the start of aligned_signal
-        len_to_copy = min(n_ref, n_align - lag_samples)
-        if len_to_copy > 0:
-            aligned_signal[:len_to_copy] = signal_to_align[lag_samples : lag_samples + len_to_copy]
-    elif lag_samples < 0: # signal_to_align starts EARLIER than ref
-        # Copy from the start of signal_to_align into aligned_signal starting at `abs(lag_samples)`
-        start_index_aligned = abs(lag_samples)
-        len_to_copy = min(n_align, n_ref - start_index_aligned)
-        if len_to_copy > 0:
-            aligned_signal[start_index_aligned : start_index_aligned + len_to_copy] = signal_to_align[:len_to_copy]
-    else: # lag_samples == 0, no shift needed
-        len_to_copy = min(n_ref, n_align)
-        aligned_signal[:len_to_copy] = signal_to_align[:len_to_copy]
-
-    return aligned_signal
-
-print("Helper functions defined.")
-print("-" * 30)
-
-# --- 3. ניתוח קורלציה וזיהוי עמודות (Correlation Analysis & Channel Selection) ---
-print("\n--- 3. Correlation Analysis (Identifying Problematic Channels) ---")
-data_structured, labels_by_filename, all_source_keys = load_data(DATA_DIR)
-
-# Perform all-pairs comparison to document findings
-all_comparisons = list(itertools.combinations_with_replacement(all_source_keys, 2))
-print(f"Performing {len(all_comparisons)} cross-correlation comparisons for analysis...")
-results = {}
-problematic_correlations_summary = {} # Store problematic correlations for summary
-
-for key1, key2 in tqdm(all_comparisons, desc="Analyzing Correlations", leave=False):
-    file1, col1 = key1
-    file2, col2 = key2
-
-    # Ensure data exists for both keys
-    if file1 not in data_structured or col1 not in data_structured[file1] or \
-       file2 not in data_structured or col2 not in data_structured[file2]:
-       continue # Skip if data is missing
-
-    signal1 = data_structured[file1][col1]
-    signal2 = data_structured[file2][col2]
-
-    # Ensure signals have minimum length
-    if len(signal1) < 2 or len(signal2) < 2:
-        continue # Skip if signals are too short
-
-    lags, corr, peak_lag, peak_val, _ = calculate_cross_correlation(signal1, signal2, SAMPLING_RATE)
-
-    if peak_val is not None:
-        results[(key1, key2)] = peak_val
-
-        # בדיקת בעיות ספציפית בין אירוע לשקט באותה עמודה
-        label1 = labels_by_filename.get(file1)
-        label2 = labels_by_filename.get(file2)
-
-        # Skip self-comparison for problem check
-        if key1 == key2:
+    # --- 1. Intra-Class Correlation (Within the same label) ---
+    print("\n--- Analyzing Intra-Class Correlations ---")
+    for label in unique_analysis_labels:
+        label_indices = indices_by_label[label]
+        if len(label_indices) < 2:
+            print(f"Skipping intra-class analysis for '{label}': Not enough windows ({len(label_indices)}).")
             continue
 
-        # Check if comparing event vs nothing on the SAME channel
-        if col1 == col2 and label1 is not None and label2 is not None and \
-           ((label1 != 'nothing' and label2 == 'nothing') or (label1 == 'nothing' and label2 != 'nothing')):
-            if abs(peak_val) > PROBLEM_THRESHOLD:
-                problematic_correlations_summary[(key1, key2)] = peak_val
-                PROBLEM_CHANNELS.add(col1) # Update problematic channels set dynamically
+        correlations_within_label = []
+        # Generate unique pairs of indices within this label
+        possible_pairs = list(itertools.combinations(label_indices, 2))
+        if len(possible_pairs) == 0: continue
 
-                # Optional: Plot and save *this specific problematic* correlation for documentation
-                # safe_title = f"Problem_Corr_{label1}_vs_{label2}_Col{col1}".replace(' ','_')
-                # filename = os.path.join(PLOT_SAVE_DIR, f"{safe_title}.png")
-                # plot_title = f"High Correlation ({peak_val:.2f})\n{label1}_Col{col1} vs {label2}_Col{col1}"
-                # plot_cross_correlation(lags, corr, peak_lag, peak_val, plot_title, filename_to_save=filename)
+        # Sample pairs if there are too many
+        num_pairs_to_sample = min(NUM_PAIRS_TO_ANALYZE_PER_COMPARISON, len(possible_pairs))
+        sampled_pairs_indices = random.sample(range(len(possible_pairs)), num_pairs_to_sample)
 
+        print(f"Analyzing {num_pairs_to_sample} pairs for label '{label}'...")
+        for pair_idx in tqdm(sampled_pairs_indices, desc=f"Corr within {label}", leave=False):
+             idx1, idx2 = possible_pairs[pair_idx]
+             window1 = all_windows[idx1]
+             window2 = all_windows[idx2]
 
-print("\nCorrelation analysis complete.")
-if problematic_correlations_summary:
-     print(f"\n--- Identified Problematic Correlations (Event vs Nothing > {PROBLEM_THRESHOLD}) ---")
-     # Sort by absolute correlation value, descending
-     sorted_problems = sorted(problematic_correlations_summary.items(), key=lambda item: abs(item[1]), reverse=True)
-     for (key1, key2), peak_val in sorted_problems[:10]: # Print top 10 problems
-         file1, col1 = key1
-         file2, col2 = key2
-         label1 = labels_by_filename.get(file1,'?')
-         label2 = labels_by_filename.get(file2,'?')
-         print(f"*   Peak={peak_val:.2f} between [{label1}@{os.path.basename(file1)}_Col{col1}] and [{label2}@{os.path.basename(file2)}_Col{col2}]")
-     print(f"Updated Problematic Channels based on analysis: {PROBLEM_CHANNELS}")
+             # Use the existing correlation function
+             _, _, _, peak_val, _ = calculate_cross_correlation(window1, window2, SAMPLING_RATE)
+
+             if peak_val is not None:
+                 correlations_within_label.append(abs(peak_val)) # Store absolute correlation
+
+        analysis_results[f"{label}_vs_{label}"] = correlations_within_label
+
+    # --- 2. Inter-Class Correlation (Between different labels) ---
+    print("\n--- Analyzing Inter-Class Correlations ---")
+    label_combinations = list(itertools.combinations(unique_analysis_labels, 2))
+
+    for label1, label2 in label_combinations:
+        indices1 = indices_by_label[label1]
+        indices2 = indices_by_label[label2]
+
+        if not indices1 or not indices2:
+            print(f"Skipping inter-class analysis for '{label1}' vs '{label2}': One or both labels have no windows.")
+            continue
+
+        correlations_between_labels = []
+        num_pairs_to_sample = NUM_PAIRS_TO_ANALYZE_PER_COMPARISON
+
+        print(f"Analyzing {num_pairs_to_sample} pairs for '{label1}' vs '{label2}'...")
+        # Sample one index from each label list for each pair
+        sampled_indices1 = random.choices(indices1, k=num_pairs_to_sample)
+        sampled_indices2 = random.choices(indices2, k=num_pairs_to_sample)
+
+        for idx1, idx2 in tqdm(zip(sampled_indices1, sampled_indices2), total=num_pairs_to_sample, desc=f"Corr {label1} vs {label2}", leave=False):
+            window1 = all_windows[idx1]
+            window2 = all_windows[idx2]
+
+            _, _, _, peak_val, _ = calculate_cross_correlation(window1, window2, SAMPLING_RATE)
+
+            if peak_val is not None:
+                correlations_between_labels.append(abs(peak_val)) # Store absolute correlation
+
+        analysis_results[f"{label1}_vs_{label2}"] = correlations_between_labels
+
+    # --- 3. Print Summary Statistics ---
+    print("\n--- Window Correlation Analysis Summary (Absolute Peak Values) ---")
+    for comparison_key, corr_values in analysis_results.items():
+        if corr_values:
+            avg_corr = np.mean(corr_values)
+            max_corr = np.max(corr_values)
+            min_corr = np.min(corr_values)
+            std_corr = np.std(corr_values)
+            median_corr = np.median(corr_values)
+            count = len(corr_values)
+            print(f"* {comparison_key} ({count} pairs):")
+            print(f"    Avg: {avg_corr:.3f}, Median: {median_corr:.3f}, Std: {std_corr:.3f}, Min: {min_corr:.3f}, Max: {max_corr:.3f}")
+        else:
+            print(f"* {comparison_key}: No correlation values calculated (check data or sampling).")
+
 else:
-     print(f"\nNo significantly high correlations (>{PROBLEM_THRESHOLD}) found between events and 'nothing' on the same channel.")
-
-# Determine good channels AFTER analysis
-all_available_channels = set(col for _, col in all_source_keys)
-good_channels = sorted(list(all_available_channels - PROBLEM_CHANNELS))
-print(f"\nAvailable Channels: {sorted(list(all_available_channels))}")
-print(f"Problematic Channels Ignored: {PROBLEM_CHANNELS}")
-print(f"Potentially Good Channels identified for use: {good_channels}")
-if not good_channels:
-    print("Error: No good channels identified after correlation analysis! Check PROBLEM_THRESHOLD or data.")
-    exit()
-print("-" * 30)
-
-
-# --- 4. מיצוע מיושר (Aligned Averaging on Good Channels) ---
-print("\n--- 4. Performing Aligned Averaging on Good Channels ---")
-averaged_signals = {} # Dictionary: label -> list of averaged signals
-processed_files_count = 0
-files_to_process = list(data_structured.keys())
-
-for filename in tqdm(files_to_process, desc="Averaging Files"):
-    if filename not in data_structured:
-        continue # Should not happen if logic is correct, but safe check
-
-    label = labels_by_filename[filename]
-    available_cols = sorted(list(data_structured[filename].keys()))
-
-    # Select only the 'good' channels available in this specific file
-    good_cols_for_file = [col for col in available_cols if col in good_channels]
-
-    if len(good_cols_for_file) < 1:
-        # tqdm.write(f"Skipping file {filename} - no good channels available.")
-        continue # Skip if no good channels for this file
-
-    elif len(good_cols_for_file) == 1:
-        # If only one good channel, use it directly
-        averaged_signal = data_structured[filename][good_cols_for_file[0]]
+    if not ANALYZE_WINDOW_CORRELATIONS:
+        print("Window correlation analysis is disabled (ANALYZE_WINDOW_CORRELATIONS=False).")
     else:
-        # Multiple good channels: Align and average
-        # Use the first good channel as the reference
-        ref_col_idx = good_cols_for_file[0]
-        signal_ref = data_structured[filename][ref_col_idx]
-        n_ref = len(signal_ref)
+        print("Skipping window correlation analysis: No windows or labels available.")
 
-        # Start sum with the reference signal
-        sum_aligned_signals = np.copy(signal_ref).astype(np.float64) # Ensure float for averaging
-        num_signals_averaged = 1
-
-        # Align other good channels to the reference
-        for i in range(1, len(good_cols_for_file)):
-            col_to_align_idx = good_cols_for_file[i]
-            signal_to_align = data_structured[filename][col_to_align_idx]
-
-            # Calculate lag relative to reference
-            _, _, _, _, peak_lag_samples = calculate_cross_correlation(signal_ref, signal_to_align, SAMPLING_RATE)
-
-            # If correlation failed or lag is None, skip this channel for averaging
-            if peak_lag_samples is None:
-                # tqdm.write(f"Warning: Could not calculate lag for {filename} Col {col_to_align_idx} vs Col {ref_col_idx}. Skipping.")
-                continue
-
-            # Align the signal
-            aligned_signal = align_signal(signal_to_align, n_ref, peak_lag_samples)
-
-            # Add to the sum
-            sum_aligned_signals += aligned_signal
-            num_signals_averaged += 1
-
-        # Calculate the average
-        if num_signals_averaged > 0:
-            averaged_signal = sum_aligned_signals / num_signals_averaged
-        else:
-            averaged_signal = signal_ref # Fallback to reference if somehow no signals were averaged (shouldn't happen)
-
-    # Store the averaged signal for this file under its label
-    if label not in averaged_signals:
-        averaged_signals[label] = []
-    averaged_signals[label].append(averaged_signal)
-    processed_files_count += 1
-
-print(f"\nFinished averaging using up to {len(good_channels)} good channels per file (where available). Processed {processed_files_count} files resulting in averaged signals.")
-if processed_files_count == 0:
-    print("Error: No files were processed for averaging. Check data or 'good_channels'.")
-    exit()
 print("-" * 30)
-
-
-# --- 5. חלוקה לחלונות (Windowing Averaged Signals) ---
-print("\n--- 5. Windowing Averaged Signals ---")
-all_windows = []
-all_window_labels = []
-labels_to_process = list(averaged_signals.keys())
-
-for label in tqdm(labels_to_process, desc="Windowing Labels", leave=False):
-    if label not in averaged_signals: continue # Safety check
-    for avg_signal in averaged_signals[label]:
-        num_samples = len(avg_signal)
-
-        # Handle signals shorter than the window size
-        if num_samples < WINDOW_SIZE_SAMPLES:
-             # Pad the signal to the required window size
-             padded_signal = np.pad(avg_signal, (0, WINDOW_SIZE_SAMPLES - num_samples), 'constant', constant_values=0)
-             all_windows.append(padded_signal)
-             all_window_labels.append(label)
-             # tqdm.write(f"Padded short signal (label: {label}, original len: {num_samples})")
-        else:
-            # Apply sliding window
-            num_windows = math.floor((num_samples - WINDOW_SIZE_SAMPLES) / HOP_SIZE_SAMPLES) + 1
-            for i in range(num_windows):
-                start_idx = i * HOP_SIZE_SAMPLES
-                end_idx = start_idx + WINDOW_SIZE_SAMPLES
-                window = avg_signal[start_idx:end_idx]
-                all_windows.append(window)
-                all_window_labels.append(label)
-
-print(f"\nFinished windowing. Total windows created: {len(all_windows)}")
-if not all_windows:
-    print("Error: No windows created. Check averaging results or window parameters.")
-    exit()
-
-print("Window counts per label:")
-unique_labels, counts = np.unique(all_window_labels, return_counts=True)
-for l, c in zip(unique_labels, counts):
-    print(f"- {l}: {c} windows")
-print("-" * 30)
-
-
+# =============================================================================
 # --- 6. יצירת ספקטוגרמות (Generating Spectrograms) ---
+# =============================================================================
+# [Start of Step 6 code - the print statement and the loop]
 print("\n--- 6. Generating Spectrograms from Windows ---")
-all_spectrograms = []
-all_spec_labels = [] # Use a new list in case some spectrograms fail
-
-for i, window_signal in enumerate(tqdm(all_windows, desc="Generating Spectrograms")):
-    try:
-        frequencies, times, Sxx = sp_signal.spectrogram(
-            window_signal,
-            fs=SAMPLING_RATE,
-            window=WINDOW,
-            nperseg=NPERSEG,
-            noverlap=NOVERLAP,
-            scaling=SCALING,
-            mode=MODE
-        )
-        # Convert to dB, handling potential zeros
-        log_Sxx = 10 * np.log10(np.maximum(Sxx, EPSILON)) # Use maximum to avoid log(0)
-        all_spectrograms.append(log_Sxx.astype(np.float32))
-        all_spec_labels.append(all_window_labels[i]) # Keep label corresponding to successful spectrogram
-    except ValueError as ve:
-        # Common error if window size is smaller than nperseg
-        tqdm.write(f"Skipping spectrogram for window {i} due to ValueError: {ve}. Check window/spectrogram parameters.")
-    except Exception as e:
-        tqdm.write(f"Error generating spectrogram for window {i}: {e}")
-
-print(f"\nGenerated {len(all_spectrograms)} spectrograms.")
-if not all_spectrograms:
-    print("Error: No spectrograms generated successfully.")
-    exit()
-print("-" * 30)
-
-
-# --- 7. הכנת נתונים לאימון (Data Preparation for Training) ---
-print("\n--- 7. Preparing Data for Training ---")
-
-# Encode labels
-label_encoder = LabelEncoder()
-encoded_labels = label_encoder.fit_transform(all_spec_labels)
-num_classes = len(label_encoder.classes_)
-class_names = list(label_encoder.classes_)
-print(f"Label encoding: {list(zip(class_names, range(num_classes)))}")
-
-# Add channel dimension for CNN (Channels=1 for grayscale spectrogram)
-spectrograms_with_channel = np.array(all_spectrograms)[:, np.newaxis, :, :]
-print(f"Spectrogram shape: {spectrograms_with_channel.shape}") # Should be (num_windows, 1, freq_bins, time_bins)
-
-# Split data
-X = spectrograms_with_channel
-y = encoded_labels
-
-# Ensure splitting happens only if there's data
-if len(X) == 0 or len(y) == 0:
-    print("Error: No data available for splitting.")
-    exit()
-if len(X) != len(y):
-     print(f"Error: Mismatch between spectrograms ({len(X)}) and labels ({len(y)}) count.")
-     exit()
-
-# Stratified split to maintain class proportions
-# Split into Train+Val and Test
-try:
-    X_train_val, X_test, y_train_val, y_test = train_test_split(
-        X, y, test_size=TEST_SIZE, random_state=SEED, stratify=y
-    )
-except ValueError as e:
-     print(f"Error during Train/Test split: {e}. Not enough samples per class? Total samples: {len(y)}")
-     # Fallback: Simple split if stratification fails (though less ideal)
-     X_train_val, X_test, y_train_val, y_test = train_test_split(
-         X, y, test_size=TEST_SIZE, random_state=SEED
-     )
-
-
-# Split Train+Val into Train and Validation
-# Adjust validation size relative to the size of the train_val set
-if len(X_train_val) == 0:
-     print("Error: Train+Val set is empty after first split.")
-     exit()
-val_size_adjusted = VALIDATION_SIZE / (1.0 - TEST_SIZE)
-if val_size_adjusted >= 1.0:
-     print("Error: Calculated validation size is too large relative to train+val set. Check TEST_SIZE and VALIDATION_SIZE.")
-     # Handle edge case: Maybe just use a small fixed number for validation
-     if len(X_train_val) > 10:
-          val_size_adjusted = 0.1 # Use 10% of remaining data for validation
-     else:
-          print("Cannot create validation set with current splits.")
-          # Option: Skip validation? Or exit? Let's assign Val = Test for now, but warn.
-          print("Warning: Assigning Test set data to Validation set due to small data size.")
-          X_train, X_val, y_train, y_val = X_train_val, X_test, y_train_val, y_test # Not ideal
-          # exit() # Or exit here
-
-else:
-    try:
-         X_train, X_val, y_train, y_val = train_test_split(
-             X_train_val, y_train_val, test_size=val_size_adjusted, random_state=SEED, stratify=y_train_val
-         )
-    except ValueError as e:
-        print(f"Error during Train/Val split: {e}. Not enough samples per class in train_val set? Size: {len(y_train_val)}")
-        # Fallback: Simple split if stratification fails
-        X_train, X_val, y_train, y_val = train_test_split(
-            X_train_val, y_train_val, test_size=val_size_adjusted, random_state=SEED
-        )
-
-
-print(f"Data split: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}")
-if len(X_train) == 0:
-     print("Error: Training set is empty.")
-     exit()
-
-# Create PyTorch Datasets
-class SpectrogramDataset(Dataset):
-    def __init__(self, features, labels):
-        self.features = torch.from_numpy(features).float()
-        self.labels = torch.from_numpy(labels).long()
-
-    def __len__(self):
-        return len(self.features)
-
-    def __getitem__(self, idx):
-        return self.features[idx], self.labels[idx]
-
-train_dataset = SpectrogramDataset(X_train, y_train)
-val_dataset = SpectrogramDataset(X_val, y_val)
-test_dataset = SpectrogramDataset(X_test, y_test)
-
-# Create DataLoaders
-# Consider num_workers based on your system
-num_workers = min(os.cpu_count(), 4) if os.cpu_count() else 2 # Heuristic for num_workers
-print(f"Using num_workers={num_workers} for DataLoaders.")
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=True)
-val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True)
-test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True)
-
-print("PyTorch Datasets and DataLoaders created.")
-print("-" * 30)
-
-
-# --- 8. הגדרת מודל CNN (CNN Model Definition) ---
-print("\n--- 8. Defining CNN Model ---")
-
-class SimpleCNN(nn.Module):
-    def __init__(self, num_classes, input_height, input_width):
-        super(SimpleCNN, self).__init__()
-        # Convolutional layers
-        self.conv_block1 = nn.Sequential(
-            nn.Conv2d(in_channels=1, out_channels=16, kernel_size=3, stride=1, padding=1), # (B, 1, H, W) -> (B, 16, H, W)
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2) # (B, 16, H/2, W/2)
-        )
-        self.conv_block2 = nn.Sequential(
-            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1), # (B, 16, H/2, W/2) -> (B, 32, H/2, W/2)
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2) # (B, 32, H/4, W/4)
-        )
-        self.conv_block3 = nn.Sequential(
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1), # (B, 32, H/4, W/4) -> (B, 64, H/4, W/4)
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2) # (B, 64, H/8, W/8)
-        )
-
-        # Calculate flattened size dynamically based on input dimensions
-        # We need to know the output size of the conv blocks
-        # Create a dummy input with the correct size
-        dummy_input = torch.randn(1, 1, input_height, input_width)
-        dummy_output = self._forward_conv(dummy_input)
-        self.flattened_size = int(np.prod(dummy_output.shape)) # Get total number of features
-
-        # Fully connected layers
-        self.fc_block = nn.Sequential(
-            nn.Flatten(), # Flatten the output of conv blocks
-            nn.Linear(self.flattened_size, 128), # Input size is dynamically calculated
-            nn.ReLU(),
-            nn.Dropout(0.5), # Regularization
-            nn.Linear(128, num_classes) # Output layer
-        )
-
-    # Helper function to pass input through conv blocks
-    def _forward_conv(self, x):
-        x = self.conv_block1(x)
-        x = self.conv_block2(x)
-        x = self.conv_block3(x)
-        return x
-
-    def forward(self, x):
-        x = self._forward_conv(x) # Pass through conv layers
-        x = self.fc_block(x)      # Pass through fully connected layers
-        return x
-
-# Get spectrogram dimensions from the data
-if len(spectrograms_with_channel) > 0:
-    spec_height = spectrograms_with_channel.shape[2]
-    spec_width = spectrograms_with_channel.shape[3]
-    print(f"Spectrogram dimensions for model: Height={spec_height}, Width={spec_width}")
-else:
-    print("Error: Cannot determine spectrogram dimensions, no data.")
-    # Use placeholder dimensions? Or exit? Let's exit.
-    exit()
-
-# Instantiate the model
-model = SimpleCNN(num_classes=num_classes, input_height=spec_height, input_width=spec_width)
-
-# Move model to GPU if available
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
-print(f"Model defined and moved to {device}.")
-# print(model) # Uncomment to print model structure
-print("-" * 30)
-
-
-# --- 9. הגדרת אימון (Training Setup) ---
-print("\n--- 9. Setting up Training ---")
-criterion = nn.CrossEntropyLoss() # Suitable for multi-class classification
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-# Learning rate scheduler: reduce LR if training plateaus (e.g., StepLR or ReduceLROnPlateau)
-scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.2) # Reduce LR by factor of 0.2 every 15 epochs
-# scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.1) # Alternative: Reduce on validation loss plateau
-
-print(f"Loss: {type(criterion).__name__}, Optimizer: {type(optimizer).__name__} (LR={LEARNING_RATE}), Scheduler: {type(scheduler).__name__}")
-print("-" * 30)
-
-
-# --- 10. לולאת אימון ואימות (Training and Validation Loop) ---
-print("\n--- 10. Starting Training ---")
-history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
-best_val_accuracy = 0.0
-epochs_no_improve = 0
-training_start_time = time.time()
-
-for epoch in range(NUM_EPOCHS):
-    epoch_start_time = time.time()
-
-    # --- Training Phase ---
-    model.train() # Set model to training mode
-    running_loss = 0.0
-    correct_train = 0
-    total_train = 0
-    train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{NUM_EPOCHS} [Train]", leave=False, unit="batch")
-    for inputs, labels in train_pbar:
-        inputs, labels = inputs.to(device), labels.to(device)
-
-        # Zero the parameter gradients
-        optimizer.zero_grad()
-
-        # Forward pass
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
-
-        # Backward pass and optimize
-        loss.backward()
-        optimizer.step()
-
-        # Statistics
-        running_loss += loss.item() * inputs.size(0)
-        _, predicted = torch.max(outputs.data, 1)
-        total_train += labels.size(0)
-        correct_train += (predicted == labels).sum().item()
-
-        # Update progress bar
-        train_pbar.set_postfix({'Loss': f"{loss.item():.4f}"})
-
-    epoch_train_loss = running_loss / len(train_loader.dataset)
-    epoch_train_acc = 100.0 * correct_train / total_train
-    history['train_loss'].append(epoch_train_loss)
-    history['train_acc'].append(epoch_train_acc)
-
-    # --- Validation Phase ---
-    model.eval() # Set model to evaluation mode
-    running_val_loss = 0.0
-    correct_val = 0
-    total_val = 0
-    val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{NUM_EPOCHS} [Val]", leave=False, unit="batch")
-    with torch.no_grad(): # Disable gradient calculation for validation
-        for inputs, labels in val_pbar:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-
-            running_val_loss += loss.item() * inputs.size(0)
-            _, predicted = torch.max(outputs.data, 1)
-            total_val += labels.size(0)
-            correct_val += (predicted == labels).sum().item()
-            val_pbar.set_postfix({'Loss': f"{loss.item():.4f}"})
-
-    epoch_val_loss = running_val_loss / len(val_loader.dataset) if len(val_loader.dataset) > 0 else 0
-    epoch_val_acc = 100.0 * correct_val / total_val if total_val > 0 else 0
-    history['val_loss'].append(epoch_val_loss)
-    history['val_acc'].append(epoch_val_acc)
-
-    # Step the scheduler (adjust LR based on epoch or validation loss)
-    # If using ReduceLROnPlateau, step with validation loss: scheduler.step(epoch_val_loss)
-    current_lr = optimizer.param_groups[0]['lr'] # Get current LR for printing
-    scheduler.step() # For StepLR
-
-    epoch_duration = time.time() - epoch_start_time
-    print(f"Epoch {epoch+1}/{NUM_EPOCHS} [{epoch_duration:.1f}s] - LR: {current_lr:.1e} "
-          f"- Train Loss: {epoch_train_loss:.4f}, Acc: {epoch_train_acc:.2f}% "
-          f"- Val Loss: {epoch_val_loss:.4f}, Acc: {epoch_val_acc:.2f}%", end="") # Print on one line initially
-
-    # Check for improvement and Early Stopping
-    if epoch_val_acc > best_val_accuracy:
-        print(f" -> Val Acc Improved ({best_val_accuracy:.2f}% -> {epoch_val_acc:.2f}%). Saving model...")
-        best_val_accuracy = epoch_val_acc
-        try:
-            torch.save(model.state_dict(), MODEL_SAVE_PATH)
-        except Exception as e:
-            print(f"  Error saving model: {e}")
-        epochs_no_improve = 0
-    else:
-        epochs_no_improve += 1
-        print(f" -> Val Acc No Improve ({epochs_no_improve}/{PATIENCE}). Best: {best_val_accuracy:.2f}%")
-        if epochs_no_improve >= PATIENCE:
-            print(f"\nEarly stopping triggered after {epoch+1} epochs.")
-            break # Exit training loop
-
-training_duration = time.time() - training_start_time
-print(f"\n--- Training Finished ({training_duration / 60:.1f} minutes) ---")
-print(f"Best Validation Accuracy achieved: {best_val_accuracy:.2f}%")
-print(f"Model saved to: {MODEL_SAVE_PATH}")
-print("-" * 30)
-
-
-# --- 11. הערכה סופית (Final Evaluation on Test Set) ---
-print("\n--- 11. Evaluating on Test Set ---")
-
-# Check if the best model was saved
-if not os.path.exists(MODEL_SAVE_PATH):
-     print(f"Error: Best model file not found at {MODEL_SAVE_PATH}. Evaluating with the current model state (last epoch).")
-     # If you want to strictly evaluate only the best saved model, uncomment the following:
-     # print("Skipping test evaluation as best model was not saved.")
-     # exit()
-else:
-    print(f"Loading best model from {MODEL_SAVE_PATH}...")
-    try:
-        model.load_state_dict(torch.load(MODEL_SAVE_PATH))
-    except Exception as e:
-         print(f"Error loading saved model state: {e}. Evaluating with current model state.")
-
-model.to(device) # Ensure model is on the correct device
-model.eval()     # Set model to evaluation mode
-
-all_preds = []
-all_labels = []
-with torch.no_grad():
-    for inputs, labels in tqdm(test_loader, desc="Testing", unit="batch"):
-        inputs, labels = inputs.to(device), labels.to(device)
-        outputs = model(inputs)
-        _, predicted = torch.max(outputs.data, 1)
-        all_preds.extend(predicted.cpu().numpy()) # Move predictions to CPU and store
-        all_labels.extend(labels.cpu().numpy())   # Move labels to CPU and store
-
-# Calculate metrics if predictions were made
-if all_labels and all_preds:
-    test_accuracy = accuracy_score(all_labels, all_preds)
-    print(f"\nTest Accuracy: {test_accuracy * 100.0:.2f}%")
-
-    print("\nClassification Report:")
-    # Use zero_division=0 to handle cases where a class might have no predictions or no true samples in the test set
-    print(classification_report(all_labels, all_preds, target_names=class_names, zero_division=0))
-
-    print("\nConfusion Matrix:")
-    cm = confusion_matrix(all_labels, all_preds)
-
-    # Plot confusion matrix
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
-    plt.xlabel('Predicted Label')
-    plt.ylabel('True Label')
-    plt.title('Confusion Matrix - Test Set')
-    # Save the plot instead of showing interactively
-    cm_save_path = os.path.join(PLOT_SAVE_DIR, "confusion_matrix_test.png")
-    try:
-        plt.savefig(cm_save_path)
-        print(f"Confusion matrix saved to {cm_save_path}")
-        plt.close() # Close the plot after saving
-    except Exception as e:
-        print(f"Error saving confusion matrix plot: {e}")
-        plt.show() # Show if saving fails
-else:
-    print("No predictions or labels found for the test set evaluation.")
-
-print("-" * 30)
-
-
-# --- 12. הצגת גרפי אימון (Plotting Training Curves) ---
-print("\n--- 12. Plotting Training Curves ---")
-
-# Check if history has data
-if not history['train_loss'] or not history['val_loss']:
-    print("No training history recorded. Skipping plotting.")
-else:
-    epochs_completed = len(history['train_loss'])
-    epochs_range = range(1, epochs_completed + 1)
-
-    plt.figure(figsize=(12, 5))
-
-    # Plot Loss
-    plt.subplot(1, 2, 1)
-    plt.plot(epochs_range, history['train_loss'], 'bo-', label='Training Loss')
-    plt.plot(epochs_range, history['val_loss'], 'ro-', label='Validation Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
-    plt.legend()
-    plt.grid(True)
-
-    # Plot Accuracy
-    plt.subplot(1, 2, 2)
-    plt.plot(epochs_range, history['train_acc'], 'bo-', label='Training Accuracy')
-    plt.plot(epochs_range, history['val_acc'], 'ro-', label='Validation Accuracy')
-    plt.xlabel('Epochs')
-    plt.ylabel('Accuracy (%)')
-    plt.title('Training and Validation Accuracy')
-    plt.ylim([0, 101]) # Accuracy is between 0 and 100
-    plt.legend()
-    plt.grid(True)
-
-    plt.suptitle('Training Metrics')
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout to prevent title overlap
-
-    # Save the plot
-    history_save_path = os.path.join(PLOT_SAVE_DIR, "training_history.png")
-    try:
-        plt.savefig(history_save_path)
-        print(f"Training history plot saved to {history_save_path}")
-        plt.close() # Close the plot after saving
-    except Exception as e:
-        print(f"Error saving training history plot: {e}")
-        plt.show() # Show if saving fails
-
-print("\n--- Full Pipeline Complete ---")
+# ... (rest of step 6 code follows)
