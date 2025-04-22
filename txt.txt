@@ -1,215 +1,79 @@
-import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
-import os
-import glob
-from tqdm import tqdm
-from scipy import signal as sp_signal
-import itertools # For generating all pairs
 
-# --- Configuration ---
-DATA_DIR = 'data'
-SAMPLING_RATE = 1000 # Hz
-COMPARE_ALL_PAIRS = True # Set to True to compare all columns, False to use specific_comparisons_to_make
-MAX_PLOTS_TO_SHOW = 50 # Limit the number of plots displayed at the end
-# MIN_CORRELATION_TO_PLOT = 0.4 # Optional: Only plot if peak abs correlation > this value
-# --------------------
-
-# --- פונקציות טעינה, קורלציה ושרטוט (זהות לקוד הקודם) ---
-def get_label_from_filename(filename):
-    filename_lower = filename.lower()
-    if 'nothing' in filename_lower: return 'nothing'
-    elif 'human' in filename_lower or 'man' in filename_lower: return 'human'
-    elif 'car' in filename_lower: return 'car'
-    else: return None
-
-data_structured = {}
-labels_by_filename = {}
-all_source_keys = [] # List of all unique (filename, col_index) tuples
-
-csv_files = glob.glob(os.path.join(DATA_DIR, '*.csv'))
-print(f"Found {len(csv_files)} CSV files in '{DATA_DIR}'.")
-print("Processing CSV files...")
-for filepath in tqdm(csv_files, desc="Loading Data", unit="file"):
-    filename = os.path.basename(filepath)
-    label = get_label_from_filename(filename)
-    if label is None: continue
-    try:
-        if os.path.getsize(filepath) == 0: continue
-        df = pd.read_csv(filepath, header=None)
-        if df.empty: continue
-        data_structured[filename] = {}
-        labels_by_filename[filename] = label
-        for i, col_name in enumerate(df.columns):
-            if pd.api.types.is_numeric_dtype(df[col_name]):
-                sensor_series = df[col_name].fillna(0).values.astype(np.float64)
-                if len(sensor_series) >= 10:
-                     data_structured[filename][i] = sensor_series
-                     all_source_keys.append((filename, i)) # Store the key
-    except Exception as e:
-        tqdm.write(f"Error processing {filename}: {e}")
-
-print(f"\nFinished loading data. Total unique signals (channels): {len(all_source_keys)}")
-if not all_source_keys:
-     print("No data loaded successfully. Exiting.")
-     exit()
-print("\nAvailable data structure summary:")
-for fname, cols_dict in data_structured.items():
-    print(f"- File: {fname} (Label: {labels_by_filename[fname]}), Columns loaded: {list(cols_dict.keys())}")
-
-def calculate_cross_correlation(sig1, sig2, sampling_rate):
-    sig1 = np.asarray(sig1, dtype=np.float64); sig2 = np.asarray(sig2, dtype=np.float64)
-    sig1 = np.nan_to_num(sig1); sig2 = np.nan_to_num(sig2)
-    if len(sig1) == 0 or len(sig2) == 0: return None, None, None, None, None
-    mean1, std1 = np.mean(sig1), np.std(sig1); mean2, std2 = np.mean(sig2), np.std(sig2)
-    sig1_norm = np.zeros_like(sig1) if std1 < 1e-9 else (sig1 - mean1) / std1
-    sig2_norm = np.zeros_like(sig2) if std2 < 1e-9 else (sig2 - mean2) / std2
-    correlation = np.correlate(sig1_norm, sig2_norm, mode='full')
-    n1, n2 = len(sig1_norm), len(sig2_norm); lags_samples = np.arange(-(n2 - 1), n1)
-    lags_ms = lags_samples * (1000.0 / sampling_rate)
-    norm_factor = np.sqrt(np.sum(sig1_norm**2) * np.sum(sig2_norm**2))
-    if norm_factor < 1e-9: normalized_correlation = np.zeros_like(correlation)
-    else: normalized_correlation = correlation / norm_factor
-    if len(normalized_correlation) == 0: return None, None, None, None, None
-    # Find peak based on absolute value to catch strong negative correlations too
-    peak_index = np.argmax(np.abs(normalized_correlation))
-    peak_lag_ms = lags_ms[peak_index]
-    peak_value = normalized_correlation[peak_index] # Get the actual signed value at the peak
-    peak_lag_samples = int(round(peak_lag_ms * sampling_rate / 1000.0)) if peak_lag_ms is not None else 0
-    if peak_index < 0 or peak_index >= len(lags_ms): peak_lag_ms, peak_value, peak_lag_samples = None, None, 0
-    return lags_ms, normalized_correlation, peak_lag_ms, peak_value, peak_lag_samples
-
-def plot_cross_correlation(lags_ms, correlation, peak_lag_ms, peak_value, title):
-    if lags_ms is None or correlation is None: return None # Return None if no plot
-    fig, ax = plt.subplots(figsize=(12, 5)) # Create figure and axes explicitly
-    ax.plot(lags_ms, correlation, label='Cross-correlation value', linewidth=1.5)
-    if peak_lag_ms is not None and peak_value is not None:
-        ax.scatter([peak_lag_ms], [peak_value], color='red', s=100, zorder=5, label=f'Peak: {peak_value:.2f} at {peak_lag_ms:.1f} ms')
-    else: ax.text(0.05, 0.9, "Peak info unavailable", transform=ax.transAxes, color='red')
-    ax.axhline(0, color='grey', linestyle='--', linewidth=0.7); ax.axvline(0, color='grey', linestyle='--', linewidth=0.7)
-    ax.set_title(title, fontsize=10) # Smaller font for potentially many plots
-    ax.set_xlabel('Lag (ms)', fontsize=10); ax.set_ylabel('Norm. Cross-corr [-1, 1]', fontsize=10)
-    ax.set_ylim([-1.1, 1.1]); ax.legend(); ax.grid(True, linestyle=':')
-    plt.tight_layout()
-    return fig # Return the figure object
-
-# --- הגדרת הזוגות להשוואה ---
-
-if COMPARE_ALL_PAIRS:
-    # השווה את כל הזוגות האפשריים של עמודות מכל הקבצים
-    # כולל השוואת עמודה עם עצמה וזוגות מאותו קובץ
-    comparisons_to_make = list(itertools.combinations_with_replacement(all_source_keys, 2))
-    print(f"\nWill compare ALL {len(comparisons_to_make)} pairs of signals (including self and within-file).")
-else:
-    # הגדר כאן השוואות ספציפיות אם COMPARE_ALL_PAIRS = False
-    print("\nCOMPARE_ALL_PAIRS is False. Define specific pairs in 'specific_comparisons_to_make'.")
-    specific_comparisons_to_make = []
-    # Example: Add specific pairs like before
-    human_file = next((f for f in data_structured if 'human' in f.lower() and 'nothing' not in f.lower()), None)
-    nothing_file = next((f for f in data_structured if 'nothing' in f.lower()), None)
-    if human_file and nothing_file and \
-       0 in data_structured.get(human_file, {}) and \
-       1 in data_structured.get(nothing_file, {}):
-           specific_comparisons_to_make.append( ((human_file, 0), (nothing_file, 1)) )
-    # ... add more specific pairs as needed ...
-    comparisons_to_make = specific_comparisons_to_make
-    print(f"Will run {len(comparisons_to_make)} specifically defined comparisons.")
-
-
-# --- הרצת ההשוואות ---
-if not comparisons_to_make:
-    print("\nNo comparisons specified or generated. Exiting analysis.")
-else:
-    print(f"\nRunning {len(comparisons_to_make)} comparisons...")
-    results = {} # Store results: key=(key1, key2), value=peak_value
-    plotted_figures = [] # Store figures to manage display
-
-    for key1, key2 in tqdm(comparisons_to_make, desc="Comparing All Pairs"):
-        file1, col1 = key1
-        file2, col2 = key2
-
-        # Skip if data is missing (should not happen with combinations_with_replacement if keys are valid)
-        if file1 not in data_structured or col1 not in data_structured[file1] or \
-           file2 not in data_structured or col2 not in data_structured[file2]:
-            # tqdm.write(f"Skipping: Data missing for {key1} or {key2}")
-            continue
-
-        signal1 = data_structured[file1][col1]
-        signal2 = data_structured[file2][col2]
-
-        if len(signal1) == 0 or len(signal2) == 0: continue # Skip empty signals
-
-        # Calculate correlation
-        lags, corr, peak_lag, peak_val, _ = calculate_cross_correlation(signal1, signal2, SAMPLING_RATE)
-
-        # Store result
-        if peak_val is not None:
-            results[(key1, key2)] = peak_val
-
-        # Plotting (with optional filtering and limits)
-        should_plot = True
-        # if 'MIN_CORRELATION_TO_PLOT' in locals() and peak_val is not None:
-        #     if abs(peak_val) < MIN_CORRELATION_TO_PLOT and key1 != key2 : # Don't filter self-correlation
-        #          should_plot = False
-
-        if should_plot and len(plotted_figures) < MAX_PLOTS_TO_SHOW:
-            label1 = labels_by_filename.get(file1, 'Unk')
-            label2 = labels_by_filename.get(file2, 'Unk')
-            f1_short = os.path.splitext(file1)[0][:10] # Shorter name
-            f2_short = os.path.splitext(file2)[0][:10]
-            title = f"Corr: [{label1}@{f1_short}_C{col1}] vs [{label2}@{f2_short}_C{col2}]"
-
-            fig = plot_cross_correlation(lags, corr, peak_lag, peak_val, title)
-            if fig:
-                plotted_figures.append(fig)
-            # If MAX_PLOTS_TO_SHOW is reached, uncomment the line below to close figures immediately
-            # and avoid memory issues, but you won't see them all at the end.
-            # elif fig:
-            #     plt.close(fig)
-
-
-    # --- סיכום ותוצאות בעייתיות ---
-    print("\n--- Analysis Summary ---")
-    print(f"Total comparisons performed: {len(results)}")
-
-    # מצא את ההשוואות הבעייתיות (קורלציה גבוהה בין קטגוריות שונות)
-    problematic_correlations = {}
-    threshold = 0.40 # סף לקורלציה "גבוהה" בין סוגים שונים
-
-    for (key1, key2), peak_val in results.items():
-         file1, col1 = key1
-         file2, col2 = key2
-         label1 = labels_by_filename.get(file1)
-         label2 = labels_by_filename.get(file2)
-
-         # בדוק אם ההשוואה היא בין קטגוריות שונות והקורלציה גבוהה
-         if label1 is not None and label2 is not None and label1 != label2 and abs(peak_val) > threshold:
-              problematic_correlations[(key1, key2)] = peak_val
-         # בדוק אם ההשוואה היא 'אדם' מול 'שקט' והקורלציה גבוהה
-         elif label1 is not None and label2 is not None and \
-              ((label1 == 'human' and label2 == 'nothing') or (label1 == 'nothing' and label2 == 'human')) and \
-              abs(peak_val) > 0.1: # סף נמוך יותר לבדיקת בעיה זו
-                 problematic_correlations[(key1, key2)] = peak_val
-
-    if problematic_correlations:
-        print(f"\n--- POTENTIALLY PROBLEMATIC Correlations (High correlation between different classes or Human/Nothing) ---")
-        # Sort by absolute correlation value, descending
-        sorted_problems = sorted(problematic_correlations.items(), key=lambda item: abs(item[1]), reverse=True)
-        for (key1, key2), peak_val in sorted_problems:
-             file1, col1 = key1; file2, col2 = key2
-             label1 = labels_by_filename.get(file1,'?'); label2 = labels_by_filename.get(file2,'?')
-             print(f"*   Peak={peak_val:.2f} between [{label1}@{file1}_Col{col1}] and [{label2}@{file2}_Col{col2}]")
-    else:
-        print("\nNo significantly high correlations found between different classes based on the threshold.")
-
-    # --- הצגת הגרפים (עד המגבלה) ---
-    if plotted_figures:
-        print(f"\nDisplaying up to {MAX_PLOTS_TO_SHOW} generated plots...")
-        plt.show()
-    elif COMPARE_ALL_PAIRS and len(comparisons_to_make) > 0:
-         print(f"\nNo plots displayed. MAX_PLOTS_TO_SHOW might be 0, or plotting conditions not met.")
-    else:
-         print("\nNo plots generated (check comparison definitions or plotting conditions).")
-
-
-print("\n--- Full Comparison Analysis Complete ---")
+--- POTENTIALLY PROBLEMATIC Correlations (High correlation between different classes or Human/Nothing) ---
+*   Peak=0.51 between [human@human.csv_Col0] and [nothing@nothing.csv_Col0]
+*   Peak=-0.44 between [human@human.csv_Col0] and [nothing@nothing.csv_Col8]
+*   Peak=-0.41 between [human@human.csv_Col0] and [nothing@nothing.csv_Col10]
+*   Peak=-0.39 between [human@human.csv_Col0] and [nothing@nothing.csv_Col14]
+*   Peak=-0.39 between [human@human.csv_Col0] and [nothing@nothing.csv_Col18]
+*   Peak=0.35 between [human@human.csv_Col0] and [nothing@nothing.csv_Col15]
+*   Peak=-0.33 between [human@human.csv_Col0] and [nothing@nothing.csv_Col13]
+*   Peak=0.30 between [human@human.csv_Col0] and [nothing@nothing.csv_Col19]
+*   Peak=-0.29 between [human@human.csv_Col0] and [nothing@nothing.csv_Col2]
+*   Peak=-0.26 between [human@human.csv_Col0] and [nothing@nothing.csv_Col7]
+*   Peak=-0.24 between [human@human.csv_Col0] and [nothing@nothing.csv_Col4]
+*   Peak=0.23 between [human@human.csv_Col0] and [nothing@nothing.csv_Col9]
+*   Peak=-0.23 between [human@human.csv_Col0] and [nothing@nothing.csv_Col17]
+*   Peak=0.20 between [human@human.csv_Col20] and [nothing@nothing.csv_Col0]
+*   Peak=0.19 between [human@human.csv_Col20] and [nothing@nothing.csv_Col20]
+*   Peak=-0.18 between [human@human.csv_Col0] and [nothing@nothing.csv_Col3]
+*   Peak=-0.18 between [human@human.csv_Col34] and [nothing@nothing.csv_Col11]
+*   Peak=-0.18 between [human@human.csv_Col0] and [nothing@nothing.csv_Col11]
+*   Peak=0.17 between [human@human.csv_Col20] and [nothing@nothing.csv_Col28]
+*   Peak=-0.17 between [human@human.csv_Col0] and [nothing@nothing.csv_Col5]
+*   Peak=-0.17 between [human@human.csv_Col20] and [nothing@nothing.csv_Col8]
+*   Peak=-0.15 between [human@human.csv_Col20] and [nothing@nothing.csv_Col18]
+*   Peak=0.15 between [human@human.csv_Col20] and [nothing@nothing.csv_Col10]
+*   Peak=0.15 between [human@human.csv_Col25] and [nothing@nothing.csv_Col25]
+*   Peak=-0.15 between [human@human.csv_Col18] and [nothing@nothing.csv_Col0]
+*   Peak=-0.15 between [human@human.csv_Col5] and [nothing@nothing.csv_Col0]
+*   Peak=0.15 between [human@human.csv_Col0] and [nothing@nothing.csv_Col6]
+*   Peak=0.15 between [human@human.csv_Col20] and [nothing@nothing.csv_Col14]
+*   Peak=-0.14 between [human@human.csv_Col0] and [nothing@nothing.csv_Col20]
+*   Peak=0.14 between [human@human.csv_Col20] and [nothing@nothing.csv_Col15]
+*   Peak=0.13 between [human@human.csv_Col18] and [nothing@nothing.csv_Col8]
+*   Peak=0.13 between [human@human.csv_Col5] and [nothing@nothing.csv_Col8]
+*   Peak=-0.13 between [human@human.csv_Col18] and [nothing@nothing.csv_Col10]
+*   Peak=-0.13 between [human@human.csv_Col20] and [nothing@nothing.csv_Col13]
+*   Peak=0.13 between [human@human.csv_Col0] and [nothing@nothing.csv_Col28]
+*   Peak=0.13 between [human@human.csv_Col5] and [nothing@nothing.csv_Col10]
+*   Peak=-0.12 between [human@human.csv_Col18] and [nothing@nothing.csv_Col18]
+*   Peak=-0.12 between [human@human.csv_Col5] and [nothing@nothing.csv_Col18]
+*   Peak=-0.12 between [human@human.csv_Col8] and [nothing@nothing.csv_Col22]
+*   Peak=-0.12 between [human@human.csv_Col22] and [nothing@nothing.csv_Col25]
+*   Peak=-0.12 between [human@human.csv_Col11] and [nothing@nothing.csv_Col25]
+*   Peak=0.12 between [human@human.csv_Col18] and [nothing@nothing.csv_Col14]
+*   Peak=-0.12 between [human@human.csv_Col20] and [nothing@nothing.csv_Col19]
+*   Peak=-0.12 between [human@human.csv_Col5] and [nothing@nothing.csv_Col11]
+*   Peak=0.12 between [human@human.csv_Col7] and [nothing@nothing.csv_Col25]
+*   Peak=-0.12 between [human@human.csv_Col22] and [nothing@nothing.csv_Col22]
+*   Peak=0.12 between [human@human.csv_Col20] and [nothing@nothing.csv_Col30]
+*   Peak=-0.12 between [human@human.csv_Col18] and [nothing@nothing.csv_Col15]
+*   Peak=-0.12 between [human@human.csv_Col5] and [nothing@nothing.csv_Col14]
+*   Peak=0.11 between [human@human.csv_Col5] and [nothing@nothing.csv_Col15]
+*   Peak=-0.11 between [human@human.csv_Col0] and [nothing@nothing.csv_Col16]
+*   Peak=-0.11 between [human@human.csv_Col7] and [nothing@nothing.csv_Col22]
+*   Peak=-0.11 between [human@human.csv_Col10] and [nothing@nothing.csv_Col22]
+*   Peak=-0.11 between [human@human.csv_Col20] and [nothing@nothing.csv_Col2]
+*   Peak=-0.11 between [human@human.csv_Col10] and [nothing@nothing.csv_Col25]
+*   Peak=-0.11 between [human@human.csv_Col16] and [nothing@nothing.csv_Col11]
+*   Peak=-0.11 between [human@human.csv_Col18] and [nothing@nothing.csv_Col11]
+*   Peak=0.11 between [human@human.csv_Col14] and [nothing@nothing.csv_Col25]
+*   Peak=-0.11 between [human@human.csv_Col25] and [nothing@nothing.csv_Col22]
+*   Peak=0.11 between [human@human.csv_Col17] and [nothing@nothing.csv_Col0]
+*   Peak=-0.11 between [human@human.csv_Col8] and [nothing@nothing.csv_Col25]
+*   Peak=-0.11 between [human@human.csv_Col1] and [nothing@nothing.csv_Col11]
+*   Peak=0.11 between [human@human.csv_Col13] and [nothing@nothing.csv_Col21]
+*   Peak=0.11 between [human@human.csv_Col17] and [nothing@nothing.csv_Col8]
+*   Peak=-0.11 between [human@human.csv_Col5] and [nothing@nothing.csv_Col13]
+*   Peak=-0.10 between [human@human.csv_Col2] and [nothing@nothing.csv_Col11]
+*   Peak=0.10 between [human@human.csv_Col18] and [nothing@nothing.csv_Col13]
+*   Peak=0.10 between [human@human.csv_Col18] and [nothing@nothing.csv_Col7]
+*   Peak=-0.10 between [human@human.csv_Col19] and [nothing@nothing.csv_Col0]
+*   Peak=0.10 between [human@human.csv_Col14] and [nothing@nothing.csv_Col22]
+*   Peak=-0.10 between [human@human.csv_Col20] and [nothing@nothing.csv_Col7]
+*   Peak=0.10 between [human@human.csv_Col38] and [nothing@nothing.csv_Col0]
+*   Peak=-0.10 between [human@human.csv_Col20] and [nothing@nothing.csv_Col34]
+*   Peak=0.10 between [human@human.csv_Col20] and [nothing@nothing.csv_Col9]
+*   Peak=-0.10 between [human@human.csv_Col17] and [nothing@nothing.csv_Col10]
+*   Peak=-0.10 between [human@human.csv_Col28] and [nothing@nothing.csv_Col0]
+*   Peak=-0.10 between [human@human.csv_Col5] and [nothing@nothing.csv_Col19]
