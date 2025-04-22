@@ -1,79 +1,320 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import os
+import glob
+from tqdm import tqdm
+from scipy import signal as sp_signal
+import itertools
 
---- POTENTIALLY PROBLEMATIC Correlations (High correlation between different classes or Human/Nothing) ---
-*   Peak=0.51 between [human@human.csv_Col0] and [nothing@nothing.csv_Col0]
-*   Peak=-0.44 between [human@human.csv_Col0] and [nothing@nothing.csv_Col8]
-*   Peak=-0.41 between [human@human.csv_Col0] and [nothing@nothing.csv_Col10]
-*   Peak=-0.39 between [human@human.csv_Col0] and [nothing@nothing.csv_Col14]
-*   Peak=-0.39 between [human@human.csv_Col0] and [nothing@nothing.csv_Col18]
-*   Peak=0.35 between [human@human.csv_Col0] and [nothing@nothing.csv_Col15]
-*   Peak=-0.33 between [human@human.csv_Col0] and [nothing@nothing.csv_Col13]
-*   Peak=0.30 between [human@human.csv_Col0] and [nothing@nothing.csv_Col19]
-*   Peak=-0.29 between [human@human.csv_Col0] and [nothing@nothing.csv_Col2]
-*   Peak=-0.26 between [human@human.csv_Col0] and [nothing@nothing.csv_Col7]
-*   Peak=-0.24 between [human@human.csv_Col0] and [nothing@nothing.csv_Col4]
-*   Peak=0.23 between [human@human.csv_Col0] and [nothing@nothing.csv_Col9]
-*   Peak=-0.23 between [human@human.csv_Col0] and [nothing@nothing.csv_Col17]
-*   Peak=0.20 between [human@human.csv_Col20] and [nothing@nothing.csv_Col0]
-*   Peak=0.19 between [human@human.csv_Col20] and [nothing@nothing.csv_Col20]
-*   Peak=-0.18 between [human@human.csv_Col0] and [nothing@nothing.csv_Col3]
-*   Peak=-0.18 between [human@human.csv_Col34] and [nothing@nothing.csv_Col11]
-*   Peak=-0.18 between [human@human.csv_Col0] and [nothing@nothing.csv_Col11]
-*   Peak=0.17 between [human@human.csv_Col20] and [nothing@nothing.csv_Col28]
-*   Peak=-0.17 between [human@human.csv_Col0] and [nothing@nothing.csv_Col5]
-*   Peak=-0.17 between [human@human.csv_Col20] and [nothing@nothing.csv_Col8]
-*   Peak=-0.15 between [human@human.csv_Col20] and [nothing@nothing.csv_Col18]
-*   Peak=0.15 between [human@human.csv_Col20] and [nothing@nothing.csv_Col10]
-*   Peak=0.15 between [human@human.csv_Col25] and [nothing@nothing.csv_Col25]
-*   Peak=-0.15 between [human@human.csv_Col18] and [nothing@nothing.csv_Col0]
-*   Peak=-0.15 between [human@human.csv_Col5] and [nothing@nothing.csv_Col0]
-*   Peak=0.15 between [human@human.csv_Col0] and [nothing@nothing.csv_Col6]
-*   Peak=0.15 between [human@human.csv_Col20] and [nothing@nothing.csv_Col14]
-*   Peak=-0.14 between [human@human.csv_Col0] and [nothing@nothing.csv_Col20]
-*   Peak=0.14 between [human@human.csv_Col20] and [nothing@nothing.csv_Col15]
-*   Peak=0.13 between [human@human.csv_Col18] and [nothing@nothing.csv_Col8]
-*   Peak=0.13 between [human@human.csv_Col5] and [nothing@nothing.csv_Col8]
-*   Peak=-0.13 between [human@human.csv_Col18] and [nothing@nothing.csv_Col10]
-*   Peak=-0.13 between [human@human.csv_Col20] and [nothing@nothing.csv_Col13]
-*   Peak=0.13 between [human@human.csv_Col0] and [nothing@nothing.csv_Col28]
-*   Peak=0.13 between [human@human.csv_Col5] and [nothing@nothing.csv_Col10]
-*   Peak=-0.12 between [human@human.csv_Col18] and [nothing@nothing.csv_Col18]
-*   Peak=-0.12 between [human@human.csv_Col5] and [nothing@nothing.csv_Col18]
-*   Peak=-0.12 between [human@human.csv_Col8] and [nothing@nothing.csv_Col22]
-*   Peak=-0.12 between [human@human.csv_Col22] and [nothing@nothing.csv_Col25]
-*   Peak=-0.12 between [human@human.csv_Col11] and [nothing@nothing.csv_Col25]
-*   Peak=0.12 between [human@human.csv_Col18] and [nothing@nothing.csv_Col14]
-*   Peak=-0.12 between [human@human.csv_Col20] and [nothing@nothing.csv_Col19]
-*   Peak=-0.12 between [human@human.csv_Col5] and [nothing@nothing.csv_Col11]
-*   Peak=0.12 between [human@human.csv_Col7] and [nothing@nothing.csv_Col25]
-*   Peak=-0.12 between [human@human.csv_Col22] and [nothing@nothing.csv_Col22]
-*   Peak=0.12 between [human@human.csv_Col20] and [nothing@nothing.csv_Col30]
-*   Peak=-0.12 between [human@human.csv_Col18] and [nothing@nothing.csv_Col15]
-*   Peak=-0.12 between [human@human.csv_Col5] and [nothing@nothing.csv_Col14]
-*   Peak=0.11 between [human@human.csv_Col5] and [nothing@nothing.csv_Col15]
-*   Peak=-0.11 between [human@human.csv_Col0] and [nothing@nothing.csv_Col16]
-*   Peak=-0.11 between [human@human.csv_Col7] and [nothing@nothing.csv_Col22]
-*   Peak=-0.11 between [human@human.csv_Col10] and [nothing@nothing.csv_Col22]
-*   Peak=-0.11 between [human@human.csv_Col20] and [nothing@nothing.csv_Col2]
-*   Peak=-0.11 between [human@human.csv_Col10] and [nothing@nothing.csv_Col25]
-*   Peak=-0.11 between [human@human.csv_Col16] and [nothing@nothing.csv_Col11]
-*   Peak=-0.11 between [human@human.csv_Col18] and [nothing@nothing.csv_Col11]
-*   Peak=0.11 between [human@human.csv_Col14] and [nothing@nothing.csv_Col25]
-*   Peak=-0.11 between [human@human.csv_Col25] and [nothing@nothing.csv_Col22]
-*   Peak=0.11 between [human@human.csv_Col17] and [nothing@nothing.csv_Col0]
-*   Peak=-0.11 between [human@human.csv_Col8] and [nothing@nothing.csv_Col25]
-*   Peak=-0.11 between [human@human.csv_Col1] and [nothing@nothing.csv_Col11]
-*   Peak=0.11 between [human@human.csv_Col13] and [nothing@nothing.csv_Col21]
-*   Peak=0.11 between [human@human.csv_Col17] and [nothing@nothing.csv_Col8]
-*   Peak=-0.11 between [human@human.csv_Col5] and [nothing@nothing.csv_Col13]
-*   Peak=-0.10 between [human@human.csv_Col2] and [nothing@nothing.csv_Col11]
-*   Peak=0.10 between [human@human.csv_Col18] and [nothing@nothing.csv_Col13]
-*   Peak=0.10 between [human@human.csv_Col18] and [nothing@nothing.csv_Col7]
-*   Peak=-0.10 between [human@human.csv_Col19] and [nothing@nothing.csv_Col0]
-*   Peak=0.10 between [human@human.csv_Col14] and [nothing@nothing.csv_Col22]
-*   Peak=-0.10 between [human@human.csv_Col20] and [nothing@nothing.csv_Col7]
-*   Peak=0.10 between [human@human.csv_Col38] and [nothing@nothing.csv_Col0]
-*   Peak=-0.10 between [human@human.csv_Col20] and [nothing@nothing.csv_Col34]
-*   Peak=0.10 between [human@human.csv_Col20] and [nothing@nothing.csv_Col9]
-*   Peak=-0.10 between [human@human.csv_Col17] and [nothing@nothing.csv_Col10]
-*   Peak=-0.10 between [human@human.csv_Col28] and [nothing@nothing.csv_Col0]
-*   Peak=-0.10 between [human@human.csv_Col5] and [nothing@nothing.csv_Col19]
+# --- 1. תצורה (Configuration) ---
+# הגדרות עיקריות לפרויקט
+DATA_DIR = 'DATATEST'  # התיקייה עם קבצי ה-CSV
+SAMPLING_RATE = 1000 # Hz (קצב הדגימה)
+
+# סף להגדרת קורלציה כ"בעייתית" בין אירוע ל'שקט' (באותה עמודה)
+# ערך גבוה יותר = פחות רגיש לבעיות קטנות
+PROBLEM_THRESHOLD = 0.20 # לדוגמה, נחשיב קורלציה מעל 0.20 כבעייתית
+
+print(f"--- Project Configuration ---")
+print(f"Data Directory: {DATA_DIR}")
+print(f"Sampling Rate: {SAMPLING_RATE} Hz")
+print(f"Problematic Correlation Threshold (Event vs Nothing): {PROBLEM_THRESHOLD}")
+print("-" * 30)
+
+# --- 2. פונקציות עזר (Helper Functions) ---
+# פונקציות לטעינה, חישוב קורלציה ושרטוט (כמו בקודים קודמים)
+
+def get_label_from_filename(filename):
+    """מחלץ תווית (קטגוריה) משם הקובץ."""
+    filename_lower = filename.lower()
+    if 'nothing' in filename_lower: return 'nothing'
+    elif 'human' in filename_lower or 'man' in filename_lower: return 'human'
+    elif 'car' in filename_lower: return 'car'
+    else: return None # התעלם מקבצים ללא תווית מוכרת
+
+def load_data(data_dir):
+    """
+    טוען את נתוני ה-CSV מהתיקייה ומארגן אותם במילון.
+    מחזיר: מילון נתונים, מילון תוויות לפי קובץ, רשימת כל המפתחות.
+    """
+    data_structured = {}
+    labels_by_filename = {}
+    all_source_keys = []
+    csv_files = glob.glob(os.path.join(data_dir, '*.csv'))
+    print(f"\n--- 2a. Loading Data ---")
+    print(f"Found {len(csv_files)} CSV files in '{data_dir}'.")
+    if not csv_files:
+         print("Error: No CSV files found. Please check DATA_DIR.")
+         exit()
+
+    for filepath in tqdm(csv_files, desc="Loading Files", unit="file"):
+        filename = os.path.basename(filepath)
+        label = get_label_from_filename(filename)
+        if label is None: continue
+        try:
+            if os.path.getsize(filepath) == 0: continue
+            df = pd.read_csv(filepath, header=None)
+            if df.empty: continue
+            data_structured[filename] = {}
+            labels_by_filename[filename] = label
+            for i, col_name in enumerate(df.columns):
+                if pd.api.types.is_numeric_dtype(df[col_name]):
+                    sensor_series = df[col_name].fillna(0).values.astype(np.float64)
+                    # ודא שהאות אינו קצר מדי או קבוע לחלוטין
+                    if len(sensor_series) >= 10 and np.std(sensor_series) > 1e-9:
+                         data_structured[filename][i] = sensor_series
+                         all_source_keys.append((filename, i))
+                    # else:
+                    #      tqdm.write(f"Skipping {filename} Col {i}: Too short or constant signal.") # Optional warning
+        except Exception as e:
+            tqdm.write(f"Error processing {filename}: {e}")
+
+    print(f"\nFinished loading. Total unique signals (channels) loaded: {len(all_source_keys)}")
+    if not all_source_keys:
+         print("Error: No valid signals loaded. Exiting.")
+         exit()
+    print("\nSummary of Loaded Data:")
+    for fname, cols_dict in data_structured.items():
+        print(f"- File: {fname} (Label: {labels_by_filename[fname]}), Columns: {list(cols_dict.keys())}")
+    print("-" * 30)
+    return data_structured, labels_by_filename, all_source_keys
+
+def calculate_cross_correlation(sig1, sig2, sampling_rate):
+    """מחשבת קרוס-קורלציה מנורמלת, מחזירה ערכים ומידע על הפיק."""
+    # ... (הפונקציה זהה לקוד הקודם, כולל החזרת peak_lag_samples) ...
+    sig1 = np.asarray(sig1, dtype=np.float64); sig2 = np.asarray(sig2, dtype=np.float64)
+    sig1 = np.nan_to_num(sig1); sig2 = np.nan_to_num(sig2)
+    if len(sig1) < 2 or len(sig2) < 2: return None, None, None, None, None # Need at least 2 points
+    mean1, std1 = np.mean(sig1), np.std(sig1); mean2, std2 = np.mean(sig2), np.std(sig2)
+    # Handle constant signals gracefully
+    if std1 < 1e-9 or std2 < 1e-9 :
+         # If both are constant, correlation is technically undefined or 1/ -1 depending on value
+         # If one is constant and the other isn't, correlation is 0
+         # Let's return 0 correlation for simplicity if either is constant.
+         n1, n2 = len(sig1), len(sig2)
+         lags_samples = np.arange(-(n2 - 1), n1)
+         lags_ms = lags_samples * (1000.0 / sampling_rate)
+         # Peak at lag 0 with value 0 if a signal is constant
+         return lags_ms, np.zeros(len(lags_ms)), 0.0, 0.0, 0
+
+    sig1_norm = (sig1 - mean1) / std1
+    sig2_norm = (sig2 - mean2) / std2
+    correlation = np.correlate(sig1_norm, sig2_norm, mode='full')
+    n1, n2 = len(sig1_norm), len(sig2_norm); lags_samples = np.arange(-(n2 - 1), n1)
+    lags_ms = lags_samples * (1000.0 / sampling_rate)
+    norm_factor = np.sqrt(np.sum(sig1_norm**2) * np.sum(sig2_norm**2))
+    if norm_factor < 1e-9: normalized_correlation = np.zeros_like(correlation)
+    else: normalized_correlation = correlation / norm_factor
+    if len(normalized_correlation) == 0: return None, None, None, None, None
+    peak_index = np.argmax(np.abs(normalized_correlation))
+    peak_lag_ms = lags_ms[peak_index]
+    peak_value = normalized_correlation[peak_index]
+    peak_lag_samples = int(round(peak_lag_ms * sampling_rate / 1000.0)) if peak_lag_ms is not None else 0
+    if peak_index < 0 or peak_index >= len(lags_ms): peak_lag_ms, peak_value, peak_lag_samples = None, None, 0
+    return lags_ms, normalized_correlation, peak_lag_ms, peak_value, peak_lag_samples
+
+
+def plot_cross_correlation(lags_ms, correlation, peak_lag_ms, peak_value, title, filename_to_save=None):
+    """מציגה גרף קרוס-קורלציה ויכולה לשמור אותו לקובץ."""
+    if lags_ms is None or correlation is None: return
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(lags_ms, correlation, label='Cross-correlation value', linewidth=1.5)
+    if peak_lag_ms is not None and peak_value is not None:
+        ax.scatter([peak_lag_ms], [peak_value], color='red', s=100, zorder=5, label=f'Peak: {peak_value:.2f} at {peak_lag_ms:.1f} ms')
+    else: ax.text(0.05, 0.9, "Peak info unavailable", transform=ax.transAxes, color='red')
+    ax.axhline(0, color='grey', linestyle='--', linewidth=0.7); ax.axvline(0, color='grey', linestyle='--', linewidth=0.7)
+    ax.set_title(title, fontsize=11) # Slightly smaller font
+    ax.set_xlabel('Lag (ms)', fontsize=10); ax.set_ylabel('Norm. Cross-corr [-1, 1]', fontsize=10)
+    ax.set_ylim([-1.1, 1.1]); ax.legend(); ax.grid(True, linestyle=':')
+    plt.tight_layout()
+    if filename_to_save:
+        try:
+            plt.savefig(filename_to_save)
+            print(f"  Saved plot: {filename_to_save}")
+        except Exception as e:
+            print(f"  Error saving plot {filename_to_save}: {e}")
+        plt.close(fig) # Close figure after saving to prevent display flood
+    else:
+        plt.show() # Show interactively if not saving
+
+# --- 3. זיהוי עמודות בעייתיות (Problematic Channel Identification) ---
+
+print("\n--- 3. Identifying Problematic Channels ---")
+print(f"Identifying channels with |correlation(Event vs Nothing)| > {PROBLEM_THRESHOLD}")
+
+data_structured, labels_by_filename, all_source_keys = load_data(DATA_DIR)
+
+# מצא את שמות הקבצים הרלוונטיים
+human_file = next((f for f in data_structured if labels_by_filename[f] == 'human'), None)
+car_file = next((f for f in data_structured if labels_by_filename[f] == 'car'), None)
+nothing_file = next((f for f in data_structured if labels_by_filename[f] == 'nothing'), None)
+
+problematic_channels = set() # נשתמש ב-set למנוע כפילויות של מספרי עמודות
+all_analyzed_channels = set() # סט של כל מספרי העמודות שקיימים בקבצים הרלוונטיים
+
+# בדיקה מול 'nothing'
+event_files = {'human': human_file, 'car': car_file}
+
+if nothing_file:
+    for event_label, event_file in event_files.items():
+        if event_file:
+            print(f"\nChecking {event_label.capitalize()} vs Nothing correlations...")
+            # מצא את העמודות המשותפות לקובץ האירוע ולקובץ ה-'nothing'
+            common_cols = sorted(list(set(data_structured.get(event_file, {}).keys()) & set(data_structured.get(nothing_file, {}).keys())))
+            all_analyzed_channels.update(common_cols) # הוסף את העמודות שנבדקו
+            print(f"  Found {len(common_cols)} common columns to check.")
+
+            for col_idx in tqdm(common_cols, desc=f"Comparing {event_label.capitalize()}_Col{col_idx} vs Nothing_Col{col_idx}"):
+                sig_event = data_structured[event_file][col_idx]
+                sig_nothing = data_structured[nothing_file][col_idx]
+
+                if len(sig_event) < 2 or len(sig_nothing) < 2: continue # Skip too short signals
+
+                _, _, _, peak_val, _ = calculate_cross_correlation(sig_event, sig_nothing, SAMPLING_RATE)
+
+                if peak_val is not None and abs(peak_val) > PROBLEM_THRESHOLD:
+                    print(f"  -> PROBLEM identified: Column {col_idx} ({event_label.capitalize()} vs Nothing), Corr = {peak_val:.2f}")
+                    problematic_channels.add(col_idx) # הוסף לרשימת הבעייתיים
+
+        else:
+             print(f"\n{event_label.capitalize()} file not found, skipping comparison with Nothing.")
+else:
+    print("\nNothing file not found, cannot perform problematic channel analysis based on it.")
+
+print(f"\nIdentified {len(problematic_channels)} potentially problematic channel indices: {sorted(list(problematic_channels))}")
+print("Reason: High correlation between event signal and 'nothing' signal on the same channel.")
+print("-" * 30)
+
+# --- 4. זיהוי עמודות "טובות" (Good Channel Identification) ---
+print("\n--- 4. Identifying Potentially Good Channels ---")
+
+# עמודות "טובות" הן אלה שנותחו אבל לא נמצאו כבעייתיות
+good_channels = sorted(list(all_analyzed_channels - problematic_channels))
+
+if not all_analyzed_channels:
+     print("Warning: No channels were analyzed against 'nothing'. Cannot determine good channels automatically.")
+     # במקרה כזה, אולי נרצה להגדיר את כל העמודות כ"טובות" באופן ידני או לבצע בדיקות אחרות
+     all_cols_in_data = set()
+     for fname in data_structured:
+         all_cols_in_data.update(data_structured[fname].keys())
+     if all_cols_in_data:
+         print(f"Assuming all found columns are potentially good (manual check recommended): {sorted(list(all_cols_in_data))}")
+         good_channels = sorted(list(all_cols_in_data))
+     else:
+         print("Error: No channels found in any loaded file.")
+         good_channels = []
+
+if good_channels:
+    print(f"Identified {len(good_channels)} potentially good channel indices: {good_channels}")
+    print("Reason: These channels were analyzed and did NOT show high correlation between events and 'nothing'.")
+else:
+    print("Could not identify any 'good' channels based on the analysis.")
+
+print("-" * 30)
+
+# --- 5. ויזואליזציה של דוגמאות (Visualization Examples) ---
+# הצג דוגמאות כדי להמחיש את ההבדל בין עמודה בעייתית לטובה
+
+print("\n--- 5. Visualization Examples ---")
+
+# הגדר עמודה בעייתית ועמודה טובה להצגה (אם קיימות)
+problematic_example_col = -1
+if problematic_channels:
+    problematic_example_col = sorted(list(problematic_channels))[0] # קח את הראשונה
+
+good_example_col = -1
+if good_channels:
+    good_example_col = good_channels[0] # קח את הראשונה
+
+plots_to_show = []
+
+# א. השוואה בעייתית: אדם מול שקט בעמודה בעייתית
+if problematic_example_col != -1 and human_file and nothing_file and \
+   problematic_example_col in data_structured.get(human_file, {}) and \
+   problematic_example_col in data_structured.get(nothing_file, {}):
+    print(f"\nPlotting example: Problematic Channel {problematic_example_col} (Human vs Nothing)")
+    sig_h_prob = data_structured[human_file][problematic_example_col]
+    sig_n_prob = data_structured[nothing_file][problematic_example_col]
+    lags, corr, peak_lag, peak_val, _ = calculate_cross_correlation(sig_h_prob, sig_n_prob, SAMPLING_RATE)
+    title = f"PROBLEM EXAMPLE: High Correlation ({peak_val:.2f})\nHuman_Col{problematic_example_col} vs Nothing_Col{problematic_example_col}"
+    plots_to_show.append({'lags':lags, 'corr':corr, 'peak_lag':peak_lag, 'peak_val':peak_val, 'title':title})
+
+# ב. השוואה טובה: אדם מול שקט בעמודה טובה
+if good_example_col != -1 and human_file and nothing_file and \
+   good_example_col in data_structured.get(human_file, {}) and \
+   good_example_col in data_structured.get(nothing_file, {}):
+    print(f"\nPlotting example: Good Channel {good_example_col} (Human vs Nothing)")
+    sig_h_good = data_structured[human_file][good_example_col]
+    sig_n_good = data_structured[nothing_file][good_example_col]
+    lags, corr, peak_lag, peak_val, _ = calculate_cross_correlation(sig_h_good, sig_n_good, SAMPLING_RATE)
+    title = f"GOOD EXAMPLE: Low Correlation ({peak_val:.2f})\nHuman_Col{good_example_col} vs Nothing_Col{good_example_col}"
+    plots_to_show.append({'lags':lags, 'corr':corr, 'peak_lag':peak_lag, 'peak_val':peak_val, 'title':title})
+
+
+# ג. השוואה פנימית בעמודה טובה: אדם מול רכב בעמודה טובה
+if good_example_col != -1 and human_file and car_file and \
+   good_example_col in data_structured.get(human_file, {}) and \
+   good_example_col in data_structured.get(car_file, {}):
+    print(f"\nPlotting example: Good Channel {good_example_col} (Human vs Car)")
+    sig_h_good = data_structured[human_file][good_example_col]
+    sig_c_good = data_structured[car_file][good_example_col]
+    lags, corr, peak_lag, peak_val, _ = calculate_cross_correlation(sig_h_good, sig_c_good, SAMPLING_RATE)
+    title = f"GOOD EXAMPLE: Separation ({peak_val:.2f})\nHuman_Col{good_example_col} vs Car_Col{good_example_col}"
+    plots_to_show.append({'lags':lags, 'corr':corr, 'peak_lag':peak_lag, 'peak_val':peak_val, 'title':title})
+
+
+# ד. השוואה בין עמודות (אופציונלי) - TDOA
+if problematic_example_col != -1 and good_example_col != -1 and human_file and \
+   problematic_example_col in data_structured.get(human_file, {}) and \
+   good_example_col in data_structured.get(human_file, {}):
+    print(f"\nPlotting example: Within Human (Col {problematic_example_col} vs Col {good_example_col}) - Shows TDOA")
+    sig_h_prob = data_structured[human_file][problematic_example_col]
+    sig_h_good = data_structured[human_file][good_example_col]
+    lags, corr, peak_lag, peak_val, lag_samples = calculate_cross_correlation(sig_h_prob, sig_h_good, SAMPLING_RATE)
+    title = f"CONTEXT: Within Human Event (TDOA={peak_lag:.1f}ms)\nHuman_Col{problematic_example_col} vs Human_Col{good_example_col} (Peak Corr: {peak_val:.2f})"
+    plots_to_show.append({'lags':lags, 'corr':corr, 'peak_lag':peak_lag, 'peak_val':peak_val, 'title':title})
+
+# הצג את הגרפים הנבחרים
+if plots_to_show:
+    print(f"\nDisplaying {len(plots_to_show)} selected example plots...")
+    # Ensure directory exists for saving plots
+    plot_save_dir = "correlation_plots"
+    os.makedirs(plot_save_dir, exist_ok=True)
+    print(f"Plots will also be saved in '{plot_save_dir}' directory.")
+
+    for i, plot_data in enumerate(plots_to_show):
+         # יצירת שם קובץ בטוח
+         safe_title = "".join(c if c.isalnum() or c in (' ', '_', '-') else '_' for c in plot_data['title'].split('\n')[0])
+         safe_title = safe_title.replace(' ', '_')[:50] # Limit length
+         filename = os.path.join(plot_save_dir, f"plot_{i+1}_{safe_title}.png")
+         plot_cross_correlation(plot_data['lags'], plot_data['corr'], plot_data['peak_lag'], plot_data['peak_val'], plot_data['title'], filename_to_save=filename)
+    # Since plots are saved and closed, we don't call plt.show() here
+    # If you want interactive plots, remove/comment out filename_to_save and plt.close(), then call plt.show() here.
+    # plt.show()
+else:
+     print("\nCould not generate example plots (missing necessary data).")
+
+
+print("-" * 30)
+# --- 6. סיכום והשלבים הבאים ---
+print("\n--- 6. Summary and Next Steps ---")
+print(f"Analysis identified {len(problematic_channels)} problematic channels: {sorted(list(problematic_channels))}")
+print(f"Analysis identified {len(good_channels)} potentially good channels: {good_channels}")
+
+if good_channels:
+    print(f"\nRecommendation: Proceed to the next step (Spectrogram Generation) using data ONLY from the 'good' channels.")
+    print(f"For example, consider using Channel {good_channels[0]} as the primary source, or averaging aligned data from several good channels.")
+    # ניתן לשמור את רשימת העמודות הטובות לקובץ לשימוש בסקריפט הבא
+    try:
+        with open("good_channels.txt", "w") as f:
+            f.write(",".join(map(str, good_channels)))
+        print("List of good channels saved to 'good_channels.txt'")
+    except Exception as e:
+        print(f"Error saving good channels list: {e}")
+
+else:
+    print("\nWarning: No 'good' channels were identified. Re-evaluate the PROBLEM_THRESHOLD or the data itself.")
+    print("Consider manual inspection of correlations or alternative preprocessing steps.")
+
+print("\n--- Analysis Script Complete ---")
