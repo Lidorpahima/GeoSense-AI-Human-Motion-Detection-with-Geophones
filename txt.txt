@@ -1,0 +1,251 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import os
+import glob
+import random
+from sklearn.preprocessing import LabelEncoder # לשמירה על עקביות עם הקוד המקורי
+
+# --- Configuration ---
+DATA_DIR = 'data'
+SAMPLING_RATE = 1000 # Hz <-- !!! ודא שזה נכון עבור הנתונים שלך !!!
+# CATEGORIES = ['nothing', 'human', 'car'] # יזוהו אוטומטית
+# --------------------
+
+def get_label_from_filename(filename):
+    """מחלץ תווית משם הקובץ. נותן עדיפות ל-'nothing'."""
+    filename_lower = filename.lower()
+    # סדר הבדיקה חשוב למנוע זיהוי שגוי (למשל, 'human_nothing' כ-'human')
+    if 'nothing' in filename_lower: return 'nothing'
+    elif 'human' in filename_lower or 'man' in filename_lower: return 'human'
+    elif 'car' in filename_lower: return 'car'
+    # ניתן להוסיף עוד תנאים אם יש קטגוריות נוספות
+    else:
+        print(f"Warning: Could not determine label for filename: {filename}")
+        return None # לא נמצאה תווית מוכרת
+
+# --- חלק טעינת הנתונים (מהקוד שלך, עם מעט שיפורי חוסן) ---
+all_series = []
+all_labels = []
+source_info = []
+
+csv_files = glob.glob(os.path.join(DATA_DIR, '*.csv'))
+print(f"Found {len(csv_files)} CSV files in '{DATA_DIR}'.")
+
+for filepath in csv_files:
+    filename = os.path.basename(filepath)
+    label = get_label_from_filename(filename)
+    if label is None:
+        continue # דלג על קבצים ללא תווית מזוהה
+
+    try:
+        # בדוק אם הקובץ ריק לפני הקריאה
+        if os.path.getsize(filepath) == 0:
+            print(f"Skipping empty file: {filename}")
+            continue
+        df = pd.read_csv(filepath, header=None)
+        # בדוק אם ה-DataFrame ריק אחרי הקריאה
+        if df.empty:
+            print(f"Skipping file with no data columns: {filename}")
+            continue
+
+        for i, col_name in enumerate(df.columns):
+            # ודא שהעמודה מכילה נתונים מספריים לפני ההמרה
+            if pd.api.types.is_numeric_dtype(df[col_name]):
+                # המר ל-float64 ליתר ביטחון, טפל בערכים חסרים אם יש (למשל, מילוי ב-0 או אינטרפולציה)
+                sensor_series = df[col_name].fillna(0).values.astype(np.float64)
+                # בדוק אם הסדרה אינה קצרה מדי או ריקה
+                if len(sensor_series) < 10: # אורך מינימלי סביר
+                     print(f"Skipping very short series (len={len(sensor_series)}) in {filename}, col {i}")
+                     continue
+                all_series.append(sensor_series)
+                all_labels.append(label)
+                source_info.append(f"{filename}_col{i}")
+            else:
+                 print(f"Skipping non-numeric column {i} in {filename}")
+
+    except pd.errors.EmptyDataError:
+        print(f"Error reading {filename}: File seems empty or wrongly formatted.")
+    except Exception as e:
+        print(f"Error processing {filename}, column {i if 'i' in locals() else 'N/A'}: {e}")
+
+print(f"\nTotal individual sensor recordings successfully loaded: {len(all_series)}")
+
+# --- שלב חדש: ארגון הנתונים לפי קטגוריה ---
+signals_by_class = {}
+if all_series:
+    # שימוש ב-LabelEncoder כדי לזהות את כל הקטגוריות הקיימות בנתונים
+    label_encoder = LabelEncoder()
+    label_encoder.fit(all_labels) # התאם לתוויות שנטענו
+    detected_categories = list(label_encoder.classes_)
+    print(f"\nDetected categories: {detected_categories}")
+
+    # אתחל מילון עם רשימות ריקות לכל קטגוריה שזוהתה
+    for cat in detected_categories:
+        signals_by_class[cat] = []
+
+    # מלא את המילון עם הסדרות המתאימות
+    for signal, label in zip(all_series, all_labels):
+        if label in signals_by_class: # ודא שהתווית זוהתה
+            signals_by_class[label].append(signal)
+
+    print("\nNumber of signals per detected category:")
+    for cat, signals in signals_by_class.items():
+        print(f"- {cat}: {len(signals)} signals")
+
+    # --- הצגת דוגמאות (אופציונלי, מהקוד המקורי שלך) ---
+    plt.figure(figsize=(15, 10))
+    plt.suptitle('Random Raw Signal Examples')
+    num_examples_to_show = min(9, len(all_series))
+    if num_examples_to_show > 0:
+        random_indices = random.sample(range(len(all_series)), num_examples_to_show)
+        for i, idx in enumerate(random_indices):
+            plt.subplot(3, 3, i + 1)
+            plt.plot(all_series[idx])
+            plt.title(f"Cat: {all_labels[idx]}\nSrc: {source_info[idx][:20]}...") # חיתוך שם ארוך
+            plt.xlabel("Samples"); plt.ylabel("Value")
+            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.show()
+
+else:
+    print("\nNo data was loaded successfully. Cannot proceed with cross-correlation.")
+    exit() # צא אם אין נתונים
+
+# --- פונקציות עזר לקרוס-קורלציה (זהות לקוד הקודם) ---
+def calculate_cross_correlation(sig1, sig2, sampling_rate):
+    """
+    מחשבת קרוס-קורלציה מנורמלת בין שני אותות ומחזירה תוצאות.
+    כולל טיפול בערכים לא סופיים ובסטיית תקן אפסית.
+    """
+    # ודא שהאותות הם מערכי numpy
+    sig1 = np.asarray(sig1, dtype=np.float64)
+    sig2 = np.asarray(sig2, dtype=np.float64)
+
+    # טפל בערכי NaN או Inf (החלף ב-0 במקרה זה)
+    sig1 = np.nan_to_num(sig1, nan=0.0, posinf=0.0, neginf=0.0)
+    sig2 = np.nan_to_num(sig2, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # בדוק אורכים
+    if len(sig1) == 0 or len(sig2) == 0:
+        print("Warning: One or both signals are empty. Skipping correlation.")
+        return None, None, None, None
+
+    # נרמול: חיסור ממוצע וחילוק בסטיית תקן
+    mean1, std1 = np.mean(sig1), np.std(sig1)
+    mean2, std2 = np.mean(sig2), np.std(sig2)
+
+    # הימנע מחלוקה באפס אם האות קבוע (std=0)
+    if std1 < 1e-9: # סף קטן מאוד
+        sig1_norm = np.zeros_like(sig1) # אם האות קבוע, הנרמול הוא 0
+    else:
+        sig1_norm = (sig1 - mean1) / std1
+
+    if std2 < 1e-9:
+        sig2_norm = np.zeros_like(sig2)
+    else:
+        sig2_norm = (sig2 - mean2) / std2
+
+    # חישוב קרוס-קורלציה עם numpy.correlate
+    correlation = np.correlate(sig1_norm, sig2_norm, mode='full')
+
+    # חישוב ה-lags (הזזות בזמן) בדגימות ובמילישניות
+    n1, n2 = len(sig1_norm), len(sig2_norm)
+    lags_samples = np.arange(-(n2 - 1), n1)
+    lags_ms = lags_samples * (1000.0 / sampling_rate)
+
+    # נרמול "קלאסי" של תוצאת הקורלציה לטווח [-1, 1]
+    # מחלקים בשורש של מכפלת האנרגיות (סכום ריבועים) של האותות המנורמלים
+    norm_factor = np.sqrt(np.sum(sig1_norm**2) * np.sum(sig2_norm**2))
+    if norm_factor < 1e-9: # אם אחד האותות הוא אפס
+        normalized_correlation = np.zeros_like(correlation)
+    else:
+        normalized_correlation = correlation / norm_factor
+
+    # מציאת הפיק (הערך המוחלט המקסימלי) וה-lag המתאים
+    # שימוש ב-abs כדי למצוא גם קורלציות שליליות חזקות
+    peak_index = np.argmax(np.abs(normalized_correlation))
+    peak_lag_ms = lags_ms[peak_index]
+    peak_value = normalized_correlation[peak_index] # ערך הקורלציה בפיק (יכול להיות שלילי)
+
+    return lags_ms, normalized_correlation, peak_lag_ms, peak_value
+
+def plot_cross_correlation(lags_ms, correlation, peak_lag_ms, peak_value, title):
+    """מציגה גרף של הקרוס-קורלציה עם סימון הפיק."""
+    if lags_ms is None or correlation is None: # בדוק אם החישוב הצליח
+         print(f"Skipping plot for '{title}' due to calculation error or empty data.")
+         return
+    plt.figure(figsize=(12, 5)) # הגדלת הגרף
+    plt.plot(lags_ms, correlation, label='Cross-correlation value')
+    # סמן את הפיק בבירור
+    plt.scatter([peak_lag_ms], [peak_value], color='red', s=100, zorder=5,
+                label=f'Peak: {peak_value:.2f} at {peak_lag_ms:.1f} ms')
+    plt.axhline(0, color='grey', linestyle='--', linewidth=0.7) # קו אפס
+    plt.axvline(0, color='grey', linestyle='--', linewidth=0.7) # קו לאג אפס
+    plt.title(title, fontsize=14)
+    plt.xlabel('Lag (ms)', fontsize=12)
+    plt.ylabel('Normalized Cross-correlation [-1, 1]', fontsize=12)
+    plt.ylim([-1.1, 1.1]) # ודא שהסקאלה נכונה לקורלציה מנורמלת
+    plt.legend()
+    plt.grid(True, linestyle=':')
+    plt.tight_layout()
+
+# --- ביצוע ניתוח קרוס-קורלציה ---
+print(f"\n--- Starting Cross-Correlation Analysis (Sampling Rate: {SAMPLING_RATE} Hz) ---")
+
+# הגדר את הקטגוריות שזוהו ושברצונך להשוות
+cat1 = 'human'
+cat2 = 'car'
+cat3 = 'nothing'
+
+# ודא שהקטגוריות קיימות במילון signals_by_class לפני שאתה ניגש אליהן
+available_categories = list(signals_by_class.keys())
+print(f"Categories available for comparison: {available_categories}")
+
+def run_comparison(category1, category2, signals_dict, rate):
+    """פונקציית עזר להרצת השוואה בין שתי קטגוריות."""
+    title = f'Cross-correlation: {category1} vs. {category2}'
+    # בדוק אם שתי הקטגוריות קיימות ויש בהן לפחות דגימה אחת
+    if category1 in signals_dict and category2 in signals_dict and \
+       len(signals_dict[category1]) > 0 and len(signals_dict[category2]) > 0:
+        # בחר את הדגימה הראשונה מכל קטגוריה לצורך ההשוואה
+        sig1_sample = signals_dict[category1][0]
+        sig2_sample = signals_dict[category2][0]
+        print(f"\nComparing '{category1}' (len={len(sig1_sample)}) vs. '{category2}' (len={len(sig2_sample)})")
+        lags, corr, peak_lag, peak_val = calculate_cross_correlation(sig1_sample, sig2_sample, rate)
+        plot_cross_correlation(lags, corr, peak_lag, peak_val, title)
+        if lags is not None:
+            print(f"Result: Peak correlation = {peak_val:.3f} at lag = {peak_lag:.1f} ms")
+    else:
+        print(f"\nSkipping comparison '{title}': Not enough data in one or both categories ({category1}: {len(signals_dict.get(category1,[]))}, {category2}: {len(signals_dict.get(category2,[]))}).")
+
+def run_intra_comparison(category, signals_dict, rate):
+    """פונקציית עזר להרצת השוואה בתוך אותה קטגוריה."""
+    title = f'Cross-correlation: {category} vs. {category} (different samples)'
+    # בדוק אם הקטגוריה קיימת ויש בה לפחות שתי דגימות
+    if category in signals_dict and len(signals_dict[category]) > 1:
+        # בחר את שתי הדגימות הראשונות
+        sig1_sample_1 = signals_dict[category][0]
+        sig1_sample_2 = signals_dict[category][1]
+        print(f"\nComparing within '{category}' (sample 1 len={len(sig1_sample_1)}, sample 2 len={len(sig1_sample_2)})")
+        lags, corr, peak_lag, peak_val = calculate_cross_correlation(sig1_sample_1, sig1_sample_2, rate)
+        plot_cross_correlation(lags, corr, peak_lag, peak_val, title)
+        if lags is not None:
+            print(f"Result: Peak correlation = {peak_val:.3f} at lag = {peak_lag:.1f} ms")
+    else:
+        print(f"\nSkipping intra-comparison for '{category}': Need at least 2 samples (found {len(signals_dict.get(category,[]))}).")
+
+
+# הרץ את ההשוואות
+run_comparison(cat1, cat2, signals_by_class, SAMPLING_RATE) # human vs car
+run_comparison(cat1, cat3, signals_by_class, SAMPLING_RATE) # human vs nothing
+run_comparison(cat2, cat3, signals_by_class, SAMPLING_RATE) # car vs nothing
+
+# הרץ השוואה בתוך קטגוריה (למשל, human מול human אחר)
+run_intra_comparison(cat1, signals_by_class, SAMPLING_RATE) # human vs human
+run_intra_comparison(cat2, signals_by_class, SAMPLING_RATE) # car vs car
+run_intra_comparison(cat3, signals_by_class, SAMPLING_RATE) # nothing vs nothing
+
+# הצג את כל הגרפים שנוצרו
+plt.show()
+
+print("\n--- Cross-Correlation Analysis Complete ---")
