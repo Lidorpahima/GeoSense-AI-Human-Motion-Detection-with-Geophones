@@ -4,12 +4,15 @@ import pandas as pd
 import os
 import glob
 from tqdm import tqdm
-from scipy import signal as sp_signal # חשוב לייבוא scipy.signal
+from scipy import signal as sp_signal
+import itertools # For generating all pairs
 
 # --- Configuration ---
-# !!! **חשוב מאוד** שנה את הערכים האלה בהתאם לנתונים שלך !!!
-DATA_DIR = 'data'  # התיקייה שמכילה את קבצי ה-CSV
-SAMPLING_RATE = 1000 # Hz (קצב הדגימה של הגאופונים)
+DATA_DIR = 'data'
+SAMPLING_RATE = 1000 # Hz
+COMPARE_ALL_PAIRS = True # Set to True to compare all columns, False to use specific_comparisons_to_make
+MAX_PLOTS_TO_SHOW = 50 # Limit the number of plots displayed at the end
+# MIN_CORRELATION_TO_PLOT = 0.4 # Optional: Only plot if peak abs correlation > this value
 # --------------------
 
 # --- פונקציות טעינה, קורלציה ושרטוט (זהות לקוד הקודם) ---
@@ -22,7 +25,7 @@ def get_label_from_filename(filename):
 
 data_structured = {}
 labels_by_filename = {}
-all_source_keys = []
+all_source_keys = [] # List of all unique (filename, col_index) tuples
 
 csv_files = glob.glob(os.path.join(DATA_DIR, '*.csv'))
 print(f"Found {len(csv_files)} CSV files in '{DATA_DIR}'.")
@@ -42,11 +45,11 @@ for filepath in tqdm(csv_files, desc="Loading Data", unit="file"):
                 sensor_series = df[col_name].fillna(0).values.astype(np.float64)
                 if len(sensor_series) >= 10:
                      data_structured[filename][i] = sensor_series
-                     all_source_keys.append((filename, i))
+                     all_source_keys.append((filename, i)) # Store the key
     except Exception as e:
         tqdm.write(f"Error processing {filename}: {e}")
 
-print(f"\nFinished loading data. Total unique signals: {len(all_source_keys)}")
+print(f"\nFinished loading data. Total unique signals (channels): {len(all_source_keys)}")
 if not all_source_keys:
      print("No data loaded successfully. Exiting.")
      exit()
@@ -57,7 +60,7 @@ for fname, cols_dict in data_structured.items():
 def calculate_cross_correlation(sig1, sig2, sampling_rate):
     sig1 = np.asarray(sig1, dtype=np.float64); sig2 = np.asarray(sig2, dtype=np.float64)
     sig1 = np.nan_to_num(sig1); sig2 = np.nan_to_num(sig2)
-    if len(sig1) == 0 or len(sig2) == 0: return None, None, None, None
+    if len(sig1) == 0 or len(sig2) == 0: return None, None, None, None, None
     mean1, std1 = np.mean(sig1), np.std(sig1); mean2, std2 = np.mean(sig2), np.std(sig2)
     sig1_norm = np.zeros_like(sig1) if std1 < 1e-9 else (sig1 - mean1) / std1
     sig2_norm = np.zeros_like(sig2) if std2 < 1e-9 else (sig2 - mean2) / std2
@@ -67,170 +70,146 @@ def calculate_cross_correlation(sig1, sig2, sampling_rate):
     norm_factor = np.sqrt(np.sum(sig1_norm**2) * np.sum(sig2_norm**2))
     if norm_factor < 1e-9: normalized_correlation = np.zeros_like(correlation)
     else: normalized_correlation = correlation / norm_factor
-    if len(normalized_correlation) == 0: return None, None, None, None
+    if len(normalized_correlation) == 0: return None, None, None, None, None
+    # Find peak based on absolute value to catch strong negative correlations too
     peak_index = np.argmax(np.abs(normalized_correlation))
     peak_lag_ms = lags_ms[peak_index]
-    peak_value = normalized_correlation[peak_index]
-    # Convert lag in ms back to lag in samples for shifting
+    peak_value = normalized_correlation[peak_index] # Get the actual signed value at the peak
     peak_lag_samples = int(round(peak_lag_ms * sampling_rate / 1000.0)) if peak_lag_ms is not None else 0
-
-    # Additional check for index validity
-    if peak_index < 0 or peak_index >= len(lags_ms):
-       peak_lag_ms, peak_value, peak_lag_samples = None, None, 0
-
-    # Return lag in samples as well
+    if peak_index < 0 or peak_index >= len(lags_ms): peak_lag_ms, peak_value, peak_lag_samples = None, None, 0
     return lags_ms, normalized_correlation, peak_lag_ms, peak_value, peak_lag_samples
 
 def plot_cross_correlation(lags_ms, correlation, peak_lag_ms, peak_value, title):
-    if lags_ms is None or correlation is None: return
-    plt.figure(figsize=(12, 5))
-    plt.plot(lags_ms, correlation, label='Cross-correlation value', linewidth=1.5)
+    if lags_ms is None or correlation is None: return None # Return None if no plot
+    fig, ax = plt.subplots(figsize=(12, 5)) # Create figure and axes explicitly
+    ax.plot(lags_ms, correlation, label='Cross-correlation value', linewidth=1.5)
     if peak_lag_ms is not None and peak_value is not None:
-        plt.scatter([peak_lag_ms], [peak_value], color='red', s=100, zorder=5, label=f'Peak: {peak_value:.2f} at {peak_lag_ms:.1f} ms')
-    else: plt.text(0.05, 0.9, "Peak info unavailable", transform=plt.gca().transAxes, color='red')
-    plt.axhline(0, color='grey', linestyle='--', linewidth=0.7); plt.axvline(0, color='grey', linestyle='--', linewidth=0.7)
-    plt.title(title, fontsize=12); plt.xlabel('Lag (ms)', fontsize=12); plt.ylabel('Normalized Cross-correlation [-1, 1]', fontsize=12)
-    plt.ylim([-1.1, 1.1]); plt.legend(); plt.grid(True, linestyle=':'); plt.tight_layout()
+        ax.scatter([peak_lag_ms], [peak_value], color='red', s=100, zorder=5, label=f'Peak: {peak_value:.2f} at {peak_lag_ms:.1f} ms')
+    else: ax.text(0.05, 0.9, "Peak info unavailable", transform=ax.transAxes, color='red')
+    ax.axhline(0, color='grey', linestyle='--', linewidth=0.7); ax.axvline(0, color='grey', linestyle='--', linewidth=0.7)
+    ax.set_title(title, fontsize=10) # Smaller font for potentially many plots
+    ax.set_xlabel('Lag (ms)', fontsize=10); ax.set_ylabel('Norm. Cross-corr [-1, 1]', fontsize=10)
+    ax.set_ylim([-1.1, 1.1]); ax.legend(); ax.grid(True, linestyle=':')
+    plt.tight_layout()
+    return fig # Return the figure object
 
-def plot_signal(signal, time_vector, title, ax=None):
-    if ax is None: fig, ax = plt.subplots(figsize=(12, 4))
-    ax.plot(time_vector, signal, linewidth=1); ax.set_title(title, fontsize=12)
-    ax.set_xlabel("Time (s)", fontsize=10); ax.set_ylabel("Amplitude", fontsize=10)
-    ax.grid(True, linestyle=':');
-    if ax is None: plt.tight_layout()
+# --- הגדרת הזוגות להשוואה ---
 
-# --- חדש: פונקציה ליישור ומיצוע ---
-def align_and_average(signal_ref, signal_to_align, fs):
-    """
-    מיישר את signal_to_align ל-signal_ref באמצעות קרוס-קורלציה ומחשב ממוצע.
-    מחזיר את האות הממוצע ואת ה-lag (בדגימות) ששימש ליישור.
-    """
-    print(f"Aligning signals (len {len(signal_ref)}, len {len(signal_to_align)})...")
-    lags_ms, correlation, peak_lag_ms, peak_value, peak_lag_samples = calculate_cross_correlation(signal_ref, signal_to_align, fs)
-
-    if peak_lag_samples is None:
-        print("Warning: Could not determine peak lag for alignment. Returning unaligned average.")
-        peak_lag_samples = 0 # Default to no shift if peak is invalid
-
-    print(f"  -> Determined Lag: {peak_lag_samples} samples ({peak_lag_ms:.1f} ms), Peak Corr: {peak_value:.2f}")
-
-    # יישור: הזזת signal_to_align
-    n_ref = len(signal_ref)
-    n_align = len(signal_to_align)
-    aligned_signal = np.zeros(n_ref) # ניצור מערך באורך אות הייחוס
-
-    if peak_lag_samples > 0:
-        # signal_to_align הגיע מאוחר יותר, צריך להזיז אותו "שמאלה" (לקצץ מההתחלה)
-        # ולהכניס אותו למערך החדש מההתחלה.
-        len_to_copy = min(n_ref, n_align - peak_lag_samples)
-        if len_to_copy > 0:
-            aligned_signal[:len_to_copy] = signal_to_align[peak_lag_samples:peak_lag_samples + len_to_copy]
-        else:
-             print("Warning: Large positive lag results in no overlap for alignment.")
-
-    elif peak_lag_samples < 0:
-        # signal_to_align הגיע מוקדם יותר, צריך להזיז אותו "ימינה" (להוסיף אפסים בהתחלה)
-        # ולהכניס אותו למערך החדש בהזזה ימינה.
-        start_index_aligned = abs(peak_lag_samples)
-        len_to_copy = min(n_align, n_ref - start_index_aligned)
-        if len_to_copy > 0 :
-            aligned_signal[start_index_aligned:start_index_aligned + len_to_copy] = signal_to_align[:len_to_copy]
-        else:
-             print("Warning: Large negative lag results in no overlap for alignment.")
-
-    else: # peak_lag_samples == 0
-        # אין צורך בהזזה, רק העתקה (וחיתוך/ריפוד אפשרי לאורך)
-        len_to_copy = min(n_ref, n_align)
-        aligned_signal[:len_to_copy] = signal_to_align[:len_to_copy]
-
-    # מיצוע: חישוב ממוצע בין אות הייחוס לאות המיושר
-    # Note: We average the reference signal with the *aligned* version of the second signal
-    # Ensuring they are effectively aligned in the time frame of the reference signal.
-    averaged_signal = (signal_ref + aligned_signal) / 2.0
-
-    return averaged_signal, peak_lag_samples, peak_value
-
-# --- זיהוי שמות קבצים ---
-human_file = next((f for f in data_structured if 'human' in f.lower() and 'nothing' not in f.lower()), None)
-nothing_file = next((f for f in data_structured if 'nothing' in f.lower()), None)
-print(f"\nUsing Human file: {human_file}, Nothing file: {nothing_file}")
-
-# --- אנליזה 1: בדיקת עמודה 1 (Human vs Nothing) ---
-print("\n--- Analysis 1: Comparing Column 1 (Human vs Nothing) ---")
-signal_human_col1 = data_structured.get(human_file, {}).get(1)
-signal_nothing_col1 = data_structured.get(nothing_file, {}).get(1)
-
-if signal_human_col1 is not None and signal_nothing_col1 is not None:
-    lags_c1, corr_c1, peak_lag_c1, peak_val_c1, _ = calculate_cross_correlation(signal_human_col1, signal_nothing_col1, SAMPLING_RATE)
-    plot_cross_correlation(lags_c1, corr_c1, peak_lag_c1, peak_val_c1, f"Cross-Correlation - Column 1\n{human_file}_Col1 vs {nothing_file}_Col1")
-    if peak_val_c1 is not None: print(f"Peak Correlation for Column 1: {peak_val_c1:.2f}")
-    plt.show()
+if COMPARE_ALL_PAIRS:
+    # השווה את כל הזוגות האפשריים של עמודות מכל הקבצים
+    # כולל השוואת עמודה עם עצמה וזוגות מאותו קובץ
+    comparisons_to_make = list(itertools.combinations_with_replacement(all_source_keys, 2))
+    print(f"\nWill compare ALL {len(comparisons_to_make)} pairs of signals (including self and within-file).")
 else:
-    print("Could not perform Column 1 analysis - signals missing.")
+    # הגדר כאן השוואות ספציפיות אם COMPARE_ALL_PAIRS = False
+    print("\nCOMPARE_ALL_PAIRS is False. Define specific pairs in 'specific_comparisons_to_make'.")
+    specific_comparisons_to_make = []
+    # Example: Add specific pairs like before
+    human_file = next((f for f in data_structured if 'human' in f.lower() and 'nothing' not in f.lower()), None)
+    nothing_file = next((f for f in data_structured if 'nothing' in f.lower()), None)
+    if human_file and nothing_file and \
+       0 in data_structured.get(human_file, {}) and \
+       1 in data_structured.get(nothing_file, {}):
+           specific_comparisons_to_make.append( ((human_file, 0), (nothing_file, 1)) )
+    # ... add more specific pairs as needed ...
+    comparisons_to_make = specific_comparisons_to_make
+    print(f"Will run {len(comparisons_to_make)} specifically defined comparisons.")
 
-# --- אנליזה 2: יישור ומיצוע ---
-print("\n--- Analysis 2: Aligning and Averaging ---")
 
-signal_human_col0 = data_structured.get(human_file, {}).get(0)
-signal_nothing_col0 = data_structured.get(nothing_file, {}).get(0)
-human_averaged = None
-nothing_averaged = None
-human_lag_01 = None
-nothing_lag_01 = None
-human_peak_corr_01 = None
-nothing_peak_corr_01 = None
-
-# מיצוע עבור Human
-if signal_human_col0 is not None and signal_human_col1 is not None:
-    print("\nAveraging Human signals (Col0 and Col1)...")
-    human_averaged, human_lag_01, human_peak_corr_01 = align_and_average(signal_human_col0, signal_human_col1, SAMPLING_RATE)
-    print(f"  -> Human Col0-Col1 Alignment Lag: {human_lag_01} samples")
-
-    # הצגת האות הממוצע (אופציונלי)
-    time_vector_human = np.arange(len(human_averaged)) / SAMPLING_RATE
-    fig_avg_h, ax_avg_h = plt.subplots(1, 1, figsize=(12, 4))
-    plot_signal(human_averaged, time_vector_human, f"Averaged Human Signal (Aligned Col0 + Col1)", ax=ax_avg_h)
-    plt.show()
+# --- הרצת ההשוואות ---
+if not comparisons_to_make:
+    print("\nNo comparisons specified or generated. Exiting analysis.")
 else:
-    print("\nSkipping Human averaging - one or both columns missing.")
+    print(f"\nRunning {len(comparisons_to_make)} comparisons...")
+    results = {} # Store results: key=(key1, key2), value=peak_value
+    plotted_figures = [] # Store figures to manage display
 
-# מיצוע עבור Nothing
-if signal_nothing_col0 is not None and signal_nothing_col1 is not None:
-    print("\nAveraging Nothing signals (Col0 and Col1)...")
-    nothing_averaged, nothing_lag_01, nothing_peak_corr_01 = align_and_average(signal_nothing_col0, signal_nothing_col1, SAMPLING_RATE)
-    print(f"  -> Nothing Col0-Col1 Alignment Lag: {nothing_lag_01} samples")
+    for key1, key2 in tqdm(comparisons_to_make, desc="Comparing All Pairs"):
+        file1, col1 = key1
+        file2, col2 = key2
 
-    # הצגת האות הממוצע (אופציונלי)
-    time_vector_nothing = np.arange(len(nothing_averaged)) / SAMPLING_RATE
-    fig_avg_n, ax_avg_n = plt.subplots(1, 1, figsize=(12, 4))
-    plot_signal(nothing_averaged, time_vector_nothing, f"Averaged Nothing Signal (Aligned Col0 + Col1)", ax=ax_avg_n)
-    plt.show()
-else:
-    print("\nSkipping Nothing averaging - one or both columns missing.")
+        # Skip if data is missing (should not happen with combinations_with_replacement if keys are valid)
+        if file1 not in data_structured or col1 not in data_structured[file1] or \
+           file2 not in data_structured or col2 not in data_structured[file2]:
+            # tqdm.write(f"Skipping: Data missing for {key1} or {key2}")
+            continue
+
+        signal1 = data_structured[file1][col1]
+        signal2 = data_structured[file2][col2]
+
+        if len(signal1) == 0 or len(signal2) == 0: continue # Skip empty signals
+
+        # Calculate correlation
+        lags, corr, peak_lag, peak_val, _ = calculate_cross_correlation(signal1, signal2, SAMPLING_RATE)
+
+        # Store result
+        if peak_val is not None:
+            results[(key1, key2)] = peak_val
+
+        # Plotting (with optional filtering and limits)
+        should_plot = True
+        # if 'MIN_CORRELATION_TO_PLOT' in locals() and peak_val is not None:
+        #     if abs(peak_val) < MIN_CORRELATION_TO_PLOT and key1 != key2 : # Don't filter self-correlation
+        #          should_plot = False
+
+        if should_plot and len(plotted_figures) < MAX_PLOTS_TO_SHOW:
+            label1 = labels_by_filename.get(file1, 'Unk')
+            label2 = labels_by_filename.get(file2, 'Unk')
+            f1_short = os.path.splitext(file1)[0][:10] # Shorter name
+            f2_short = os.path.splitext(file2)[0][:10]
+            title = f"Corr: [{label1}@{f1_short}_C{col1}] vs [{label2}@{f2_short}_C{col2}]"
+
+            fig = plot_cross_correlation(lags, corr, peak_lag, peak_val, title)
+            if fig:
+                plotted_figures.append(fig)
+            # If MAX_PLOTS_TO_SHOW is reached, uncomment the line below to close figures immediately
+            # and avoid memory issues, but you won't see them all at the end.
+            # elif fig:
+            #     plt.close(fig)
 
 
-# --- אנליזה 3: קרוס-קורלציה של האותות הממוצעים ---
-print("\n--- Analysis 3: Comparing Averaged Signals (Human vs Nothing) ---")
+    # --- סיכום ותוצאות בעייתיות ---
+    print("\n--- Analysis Summary ---")
+    print(f"Total comparisons performed: {len(results)}")
 
-if human_averaged is not None and nothing_averaged is not None:
-    lags_avg, corr_avg, peak_lag_avg, peak_val_avg, _ = calculate_cross_correlation(human_averaged, nothing_averaged, SAMPLING_RATE)
-    plot_cross_correlation(lags_avg, corr_avg, peak_lag_avg, peak_val_avg, f"Cross-Correlation - AVERAGED Signals\nAveraged Human vs Averaged Nothing")
-    if peak_val_avg is not None: print(f"Peak Correlation for AVERAGED signals: {peak_val_avg:.2f}")
-    plt.show()
+    # מצא את ההשוואות הבעייתיות (קורלציה גבוהה בין קטגוריות שונות)
+    problematic_correlations = {}
+    threshold = 0.40 # סף לקורלציה "גבוהה" בין סוגים שונים
 
-    # --- השוואה סופית ---
-    print("\n--- Summary of Peak Correlations (Human vs Nothing) ---")
-    # הצג מחדש את הקורלציה המקורית של עמודה 0 אם אפשר
-    if signal_human_col0 is not None and signal_nothing_col0 is not None:
-         _, _, _, peak_val_c0, _ = calculate_cross_correlation(signal_human_col0, signal_nothing_col0, SAMPLING_RATE)
-         print(f"*   Original (Col 0 vs Col 0): {peak_val_c0:.2f}" if peak_val_c0 is not None else "*   Original (Col 0 vs Col 0): Not Available")
+    for (key1, key2), peak_val in results.items():
+         file1, col1 = key1
+         file2, col2 = key2
+         label1 = labels_by_filename.get(file1)
+         label2 = labels_by_filename.get(file2)
+
+         # בדוק אם ההשוואה היא בין קטגוריות שונות והקורלציה גבוהה
+         if label1 is not None and label2 is not None and label1 != label2 and abs(peak_val) > threshold:
+              problematic_correlations[(key1, key2)] = peak_val
+         # בדוק אם ההשוואה היא 'אדם' מול 'שקט' והקורלציה גבוהה
+         elif label1 is not None and label2 is not None and \
+              ((label1 == 'human' and label2 == 'nothing') or (label1 == 'nothing' and label2 == 'human')) and \
+              abs(peak_val) > 0.1: # סף נמוך יותר לבדיקת בעיה זו
+                 problematic_correlations[(key1, key2)] = peak_val
+
+    if problematic_correlations:
+        print(f"\n--- POTENTIALLY PROBLEMATIC Correlations (High correlation between different classes or Human/Nothing) ---")
+        # Sort by absolute correlation value, descending
+        sorted_problems = sorted(problematic_correlations.items(), key=lambda item: abs(item[1]), reverse=True)
+        for (key1, key2), peak_val in sorted_problems:
+             file1, col1 = key1; file2, col2 = key2
+             label1 = labels_by_filename.get(file1,'?'); label2 = labels_by_filename.get(file2,'?')
+             print(f"*   Peak={peak_val:.2f} between [{label1}@{file1}_Col{col1}] and [{label2}@{file2}_Col{col2}]")
     else:
-         print("*   Original (Col 0 vs Col 0): Not Available")
+        print("\nNo significantly high correlations found between different classes based on the threshold.")
 
-    print(f"*   Column 1 (Col 1 vs Col 1): {peak_val_c1:.2f}" if 'peak_val_c1' in locals() and peak_val_c1 is not None else "*   Column 1 (Col 1 vs Col 1): Not Available / Not Calculated")
-    print(f"*   AVERAGED (Avg Human vs Avg Nothing): {peak_val_avg:.2f}" if peak_val_avg is not None else "*   AVERAGED (Avg Human vs Avg Nothing): Not Available / Calculation Failed")
-else:
-    print("Could not perform comparison on averaged signals - averaging failed for one or both.")
+    # --- הצגת הגרפים (עד המגבלה) ---
+    if plotted_figures:
+        print(f"\nDisplaying up to {MAX_PLOTS_TO_SHOW} generated plots...")
+        plt.show()
+    elif COMPARE_ALL_PAIRS and len(comparisons_to_make) > 0:
+         print(f"\nNo plots displayed. MAX_PLOTS_TO_SHOW might be 0, or plotting conditions not met.")
+    else:
+         print("\nNo plots generated (check comparison definitions or plotting conditions).")
 
 
-print("\n--- Analysis Script Complete ---")
+print("\n--- Full Comparison Analysis Complete ---")
