@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-# --- המשך מהקוד הקודם: יצירת ספקטוגרמות ואימון CNN ---
+# =============================================================================
+# Full Pipeline: Geophone Data Analysis, Preprocessing, Spectrograms, and CNN Training
+# =============================================================================
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -13,52 +15,68 @@ import math
 import random
 import time
 
-# --- ייבוא ספריות ללמידה עמוקה ---
+# Deep Learning Imports
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, random_split
-from torchvision import transforms # יכול להיות שימושי לנרמול/אוגמנטציה
+from torchvision import transforms
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
 import seaborn as sns
 
+print("--- Starting Full Pipeline ---")
 
+# =============================================================================
 # --- 1. תצורה (Configuration) ---
-DATA_DIR = 'data'
-SAMPLING_RATE = 1000 # Hz
-PROBLEM_CHANNELS = {0} # עמודה 0 זוהתה כבעייתית
-WINDOW_DURATION_SEC = 5
-HOP_RATIO = 0.5
+# =============================================================================
+DATA_DIR = 'data'                  # Directory containing the CSV files
+SAMPLING_RATE = 1000               # Hz (Sampling rate of the geophones)
+PROBLEM_CHANNELS = {0}             # Set of problematic channel indices (identified previously)
+PLOT_SAVE_DIR = "output_plots"     # Directory to save analysis plots
+MODEL_SAVE_PATH = "best_cnn_model.pth" # Path to save the best trained model
+
+# Windowing Parameters
+WINDOW_DURATION_SEC = 5            # Length of each window in seconds
+HOP_RATIO = 0.5                    # Percentage overlap between windows (0.5 = 50%)
 WINDOW_SIZE_SAMPLES = int(WINDOW_DURATION_SEC * SAMPLING_RATE)
 HOP_SIZE_SAMPLES = int(WINDOW_SIZE_SAMPLES * HOP_RATIO)
-NPERSEG = 256
-NOVERLAP_RATIO = 0.75
+
+# Spectrogram Parameters
+NPERSEG = 256                      # Length of each segment (FFT window)
+NOVERLAP_RATIO = 0.75              # Overlap ratio for spectrogram windows
 NOVERLAP = int(NPERSEG * NOVERLAP_RATIO)
-WINDOW = 'hann'
-SCALING = 'density'
-MODE = 'psd'
-epsilon = 1e-10
+WINDOW = 'hann'                    # Window type
+SCALING = 'density'                # 'density' for PSD, 'spectrum' for STFT magnitude
+MODE = 'psd'                       # Output mode ('psd', 'magnitude')
+EPSILON = 1e-10                    # Small value to prevent log(0)
 
-# --- הגדרות אימון ---
-SEED = 42 # לתוצאות עקביות
-TEST_SIZE = 0.15 # אחוז ל-Test set
-VALIDATION_SIZE = 0.15 # אחוז ל-Validation set (מתוך מה שנשאר אחרי Test)
-BATCH_SIZE = 32
-LEARNING_RATE = 0.0005 # קצב למידה התחלתי (אפשר לשנות)
-NUM_EPOCHS = 50      # מספר סיבובי אימון (אפשר להגדיל אם צריך)
-PATIENCE = 10        # Early stopping: כמה epochs לחכות ללא שיפור לפני עצירה
+# Training Parameters
+SEED = 42                          # For reproducibility
+TEST_SIZE = 0.15                   # Proportion for the Test set
+VALIDATION_SIZE = 0.15             # Proportion for the Validation set (from non-Test data)
+BATCH_SIZE = 32                    # Number of samples per batch during training
+LEARNING_RATE = 0.0005             # Initial learning rate for the optimizer
+NUM_EPOCHS = 50                    # Maximum number of training epochs
+PATIENCE = 10                      # Early stopping patience (epochs without improvement)
+SHOW_ANALYSIS_PLOTS = False        # Set to True to show correlation plots interactively (can be many!)
 
-print(f"--- Project Configuration ---")
+print(f"--- 1. Project Configuration ---")
+print(f"Data Directory: {DATA_DIR}")
+print(f"Sampling Rate: {SAMPLING_RATE} Hz")
+print(f"Problematic Channels Ignored: {PROBLEM_CHANNELS}")
+print(f"Window Duration: {WINDOW_DURATION_SEC} sec ({WINDOW_SIZE_SAMPLES} samples)")
+print(f"Window Hop Size: {HOP_SIZE_SAMPLES} samples ({HOP_RATIO*100:.0f}% overlap)")
+print(f"Spectrogram nperseg: {NPERSEG}, noverlap: {NOVERLAP}")
 print(f"Train/Val/Test Split: Train=~{1-TEST_SIZE-VALIDATION_SIZE*(1-TEST_SIZE):.0%}, Val=~{VALIDATION_SIZE*(1-TEST_SIZE):.0%}, Test=~{TEST_SIZE:.0%}")
-print(f"Batch Size: {BATCH_SIZE}")
-print(f"Learning Rate: {LEARNING_RATE}")
-print(f"Num Epochs: {NUM_EPOCHS}")
-print(f"Early Stopping Patience: {PATIENCE}")
+print(f"Batch Size: {BATCH_SIZE}, LR: {LEARNING_RATE}, Epochs: {NUM_EPOCHS}, Patience: {PATIENCE}")
 print("-" * 30)
 
-# --- הגדרת Seed ---
+# Create directories if they don't exist
+os.makedirs(PLOT_SAVE_DIR, exist_ok=True)
+
+# Set Seed for reproducibility
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
@@ -67,27 +85,167 @@ if torch.cuda.is_available():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-# --- 2. פונקציות עזר (טעינה, קורלציה, יישור - מהקוד הקודם) ---
-# נניח שהפונקציות load_data, calculate_cross_correlation, align_signal קיימות כאן
-# ... (העתק את הפונקציות האלה מהקוד הקודם לכאן) ...
-def get_label_from_filename(filename): filename_lower = filename.lower(); if 'nothing' in filename_lower: return 'nothing'; elif 'human' in filename_lower or 'man' in filename_lower: return 'human'; elif 'car' in filename_lower: return 'car'; else: return None
-def load_data(data_dir): data_structured = {}; labels_by_filename = {}; all_source_keys = []; csv_files = glob.glob(os.path.join(data_dir, '*.csv')); if not csv_files: print("Error: No CSV files found."); exit(); for filepath in tqdm(csv_files, desc="Loading Files", unit="file"): filename = os.path.basename(filepath); label = get_label_from_filename(filename); if label is None: continue; try: if os.path.getsize(filepath) == 0: continue; df = pd.read_csv(filepath, header=None); if df.empty: continue; data_structured[filename] = {}; labels_by_filename[filename] = label; for i, col_name in enumerate(df.columns): if pd.api.types.is_numeric_dtype(df[col_name]): sensor_series = df[col_name].fillna(0).values.astype(np.float64); if len(sensor_series) >= 10 and np.std(sensor_series) > 1e-9: data_structured[filename][i] = sensor_series; all_source_keys.append((filename, i)) except Exception as e: tqdm.write(f"Error processing {filename}: {e}"); print(f"\nFinished loading. Total unique signals loaded: {len(all_source_keys)}"); if not all_source_keys: print("Error: No valid signals loaded."); exit(); print("\nSummary:"); for fname, cols_dict in data_structured.items(): print(f"- {fname} ({labels_by_filename[fname]}): Cols {list(cols_dict.keys())}"); print("-" * 30); return data_structured, labels_by_filename, all_source_keys
-def calculate_cross_correlation(sig1, sig2, sampling_rate): sig1 = np.asarray(sig1, dtype=np.float64); sig2 = np.asarray(sig2, dtype=np.float64); sig1 = np.nan_to_num(sig1); sig2 = np.nan_to_num(sig2); if len(sig1) < 2 or len(sig2) < 2: return None, None, None, None, None; mean1, std1 = np.mean(sig1), np.std(sig1); mean2, std2 = np.mean(sig2), np.std(sig2); if std1 < 1e-9 or std2 < 1e-9 : n1, n2 = len(sig1), len(sig2); lags_samples = np.arange(-(n2 - 1), n1); lags_ms = lags_samples * (1000.0 / sampling_rate); return lags_ms, np.zeros(len(lags_ms)), 0.0, 0.0, 0; sig1_norm = (sig1 - mean1) / std1; sig2_norm = (sig2 - mean2) / std2; correlation = np.correlate(sig1_norm, sig2_norm, mode='full'); n1, n2 = len(sig1_norm), len(sig2_norm); lags_samples = np.arange(-(n2 - 1), n1); lags_ms = lags_samples * (1000.0 / sampling_rate); norm_factor = np.sqrt(np.sum(sig1_norm**2) * np.sum(sig2_norm**2)); if norm_factor < 1e-9: normalized_correlation = np.zeros_like(correlation); else: normalized_correlation = correlation / norm_factor; if len(normalized_correlation) == 0: return None, None, None, None, None; peak_index = np.argmax(np.abs(normalized_correlation)); peak_lag_ms = lags_ms[peak_index]; peak_value = normalized_correlation[peak_index]; peak_lag_samples = int(round(peak_lag_ms * sampling_rate / 1000.0)) if peak_lag_ms is not None else 0; if peak_index < 0 or peak_index >= len(lags_ms): peak_lag_ms, peak_value, peak_lag_samples = None, None, 0; return lags_ms, normalized_correlation, peak_lag_ms, peak_value, peak_lag_samples
-def align_signal(signal_to_align, n_ref, lag_samples): n_align = len(signal_to_align); aligned_signal = np.zeros(n_ref); if lag_samples > 0: len_to_copy = min(n_ref, n_align - lag_samples); if len_to_copy > 0: aligned_signal[:len_to_copy] = signal_to_align[lag_samples:lag_samples + len_to_copy]; elif lag_samples < 0: start_index_aligned = abs(lag_samples); len_to_copy = min(n_align, n_ref - start_index_aligned); if len_to_copy > 0: aligned_signal[start_index_aligned:start_index_aligned + len_to_copy] = signal_to_align[:len_to_copy]; else: len_to_copy = min(n_ref, n_align); aligned_signal[:len_to_copy] = signal_to_align[:len_to_copy]; return aligned_signal
+# =============================================================================
+# --- 2. פונקציות עזר (Helper Functions) ---
+# =============================================================================
+print("\n--- 2. Defining Helper Functions ---")
 
-# --- 3. מיצוע מיושר (כמו בקוד הקודם) ---
-print("\n--- 3. Performing Aligned Averaging ---")
-data_structured, labels_by_filename, _ = load_data(DATA_DIR)
+def get_label_from_filename(filename):
+    """Extracts label (category) from filename."""
+    filename_lower = filename.lower()
+    if 'nothing' in filename_lower: return 'nothing'
+    elif 'human' in filename_lower or 'man' in filename_lower: return 'human'
+    elif 'car' in filename_lower: return 'car'
+    else: return None
+
+def load_data(data_dir):
+    """Loads CSV data from the directory and organizes it."""
+    data_structured = {}
+    labels_by_filename = {}
+    all_source_keys = []
+    csv_files = glob.glob(os.path.join(data_dir, '*.csv'))
+    print(f"\n--- 2a. Loading Data ---")
+    print(f"Found {len(csv_files)} CSV files in '{data_dir}'.")
+    if not csv_files: print("Error: No CSV files found."); exit()
+    for filepath in tqdm(csv_files, desc="Loading Files", unit="file", leave=False):
+        filename = os.path.basename(filepath)
+        label = get_label_from_filename(filename)
+        if label is None: continue
+        try:
+            if os.path.getsize(filepath) == 0: continue
+            df = pd.read_csv(filepath, header=None)
+            if df.empty: continue
+            data_structured[filename] = {}
+            labels_by_filename[filename] = label
+            for i, col_name in enumerate(df.columns):
+                if pd.api.types.is_numeric_dtype(df[col_name]):
+                    sensor_series = df[col_name].fillna(0).values.astype(np.float64)
+                    if len(sensor_series) >= 10 and np.std(sensor_series) > 1e-9:
+                         data_structured[filename][i] = sensor_series
+                         all_source_keys.append((filename, i))
+        except Exception as e: tqdm.write(f"Error processing {filename}: {e}")
+    print(f"\nFinished loading. Total unique signals (channels) loaded: {len(all_source_keys)}")
+    if not all_source_keys: print("Error: No valid signals loaded."); exit()
+    print("\nSummary of Loaded Data:")
+    for fname, cols_dict in data_structured.items(): print(f"- File: {fname} (Label: {labels_by_filename[fname]}), Columns: {list(cols_dict.keys())}")
+    print("-" * 30)
+    return data_structured, labels_by_filename, all_source_keys
+
+def calculate_cross_correlation(sig1, sig2, sampling_rate):
+    """Calculates normalized cross-correlation and peak info."""
+    sig1 = np.asarray(sig1, dtype=np.float64); sig2 = np.asarray(sig2, dtype=np.float64)
+    sig1 = np.nan_to_num(sig1); sig2 = np.nan_to_num(sig2)
+    if len(sig1) < 2 or len(sig2) < 2: return None, None, None, None, None
+    mean1, std1 = np.mean(sig1), np.std(sig1); mean2, std2 = np.mean(sig2), np.std(sig2)
+    if std1 < 1e-9 or std2 < 1e-9 : n1, n2 = len(sig1), len(sig2); lags_samples = np.arange(-(n2 - 1), n1); lags_ms = lags_samples * (1000.0 / sampling_rate); return lags_ms, np.zeros(len(lags_ms)), 0.0, 0.0, 0
+    sig1_norm = (sig1 - mean1) / std1; sig2_norm = (sig2 - mean2) / std2
+    correlation = np.correlate(sig1_norm, sig2_norm, mode='full')
+    n1, n2 = len(sig1_norm), len(sig2_norm); lags_samples = np.arange(-(n2 - 1), n1)
+    lags_ms = lags_samples * (1000.0 / sampling_rate)
+    norm_factor = np.sqrt(np.sum(sig1_norm**2) * np.sum(sig2_norm**2))
+    if norm_factor < 1e-9: normalized_correlation = np.zeros_like(correlation); else: normalized_correlation = correlation / norm_factor
+    if len(normalized_correlation) == 0: return None, None, None, None, None
+    peak_index = np.argmax(np.abs(normalized_correlation)); peak_lag_ms = lags_ms[peak_index]; peak_value = normalized_correlation[peak_index]
+    peak_lag_samples = int(round(peak_lag_ms * sampling_rate / 1000.0)) if peak_lag_ms is not None else 0
+    if peak_index < 0 or peak_index >= len(lags_ms): peak_lag_ms, peak_value, peak_lag_samples = None, None, 0
+    return lags_ms, normalized_correlation, peak_lag_ms, peak_value, peak_lag_samples
+
+def plot_cross_correlation(lags_ms, correlation, peak_lag_ms, peak_value, title, filename_to_save=None):
+    """Plots cross-correlation, optionally saves to file."""
+    if lags_ms is None or correlation is None: return
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(lags_ms, correlation, label='Cross-correlation value', linewidth=1.5)
+    if peak_lag_ms is not None and peak_value is not None: ax.scatter([peak_lag_ms], [peak_value], color='red', s=100, zorder=5, label=f'Peak: {peak_value:.2f} at {peak_lag_ms:.1f} ms'); else: ax.text(0.05, 0.9, "Peak info unavailable", transform=ax.transAxes, color='red')
+    ax.axhline(0, color='grey', linestyle='--', linewidth=0.7); ax.axvline(0, color='grey', linestyle='--', linewidth=0.7)
+    ax.set_title(title, fontsize=11); ax.set_xlabel('Lag (ms)', fontsize=10); ax.set_ylabel('Norm. Cross-corr [-1, 1]', fontsize=10)
+    ax.set_ylim([-1.1, 1.1]); ax.legend(); ax.grid(True, linestyle=':'); plt.tight_layout()
+    if filename_to_save:
+        try: plt.savefig(filename_to_save); print(f"  Saved plot: {filename_to_save}")
+        except Exception as e: print(f"  Error saving plot {filename_to_save}: {e}")
+        plt.close(fig) # Close after saving
+    elif SHOW_ANALYSIS_PLOTS:
+        plt.show() # Show interactively only if requested
+    else:
+        plt.close(fig) # Close if not saving and not showing interactively
+
+def align_signal(signal_to_align, n_ref, lag_samples):
+    """Aligns a signal based on a given lag relative to a reference length."""
+    n_align = len(signal_to_align); aligned_signal = np.zeros(n_ref)
+    if lag_samples > 0: len_to_copy = min(n_ref, n_align - lag_samples); if len_to_copy > 0: aligned_signal[:len_to_copy] = signal_to_align[lag_samples:lag_samples + len_to_copy]
+    elif lag_samples < 0: start_index_aligned = abs(lag_samples); len_to_copy = min(n_align, n_ref - start_index_aligned); if len_to_copy > 0: aligned_signal[start_index_aligned:start_index_aligned + len_to_copy] = signal_to_align[:len_to_copy]
+    else: len_to_copy = min(n_ref, n_align); aligned_signal[:len_to_copy] = signal_to_align[:len_to_copy]
+    return aligned_signal
+
+print("Helper functions defined.")
+print("-" * 30)
+
+# --- 3. ניתוח קורלציה וזיהוי עמודות (Correlation Analysis & Channel Selection) ---
+# (הרצת ניתוח קורלציה מלא לתיעוד, אבל לא נשתמש בכל הגרפים)
+print("\n--- 3. Correlation Analysis (Identifying Problematic Channels) ---")
+data_structured, labels_by_filename, all_source_keys = load_data(DATA_DIR)
+
+# Perform all-pairs comparison to document findings
+all_comparisons = list(itertools.combinations_with_replacement(all_source_keys, 2))
+print(f"Performing {len(all_comparisons)} cross-correlation comparisons for analysis...")
+results = {}
+problematic_correlations_summary = {} # Store problematic correlations for summary
+
+for key1, key2 in tqdm(all_comparisons, desc="Analyzing Correlations", leave=False):
+    file1, col1 = key1; file2, col2 = key2
+    if file1 not in data_structured or col1 not in data_structured[file1] or \
+       file2 not in data_structured or col2 not in data_structured[file2]: continue
+    signal1 = data_structured[file1][col1]; signal2 = data_structured[file2][col2]
+    if len(signal1) < 2 or len(signal2) < 2: continue
+
+    lags, corr, peak_lag, peak_val, _ = calculate_cross_correlation(signal1, signal2, SAMPLING_RATE)
+    if peak_val is not None: results[(key1, key2)] = peak_val
+
+    # בדיקת בעיות ספציפית בין אירוע לשקט באותה עמודה
+    label1 = labels_by_filename.get(file1); label2 = labels_by_filename.get(file2)
+    if key1 == key2: continue # Skip self-comparison for problem check
+    if col1 == col2 and label1 is not None and label2 is not None and label1 != 'nothing' and label2 == 'nothing':
+        if abs(peak_val) > PROBLEM_THRESHOLD:
+            problematic_correlations_summary[(key1, key2)] = peak_val
+            PROBLEM_CHANNELS.add(col1) # Update problematic channels set
+
+    # Optional: Plot and save *this specific problematic* correlation for documentation
+    # if abs(peak_val) > PROBLEM_THRESHOLD and col1 == col2 and label1 != label2 and (label1=='nothing' or label2=='nothing'):
+    #     safe_title = f"Problem_Corr_{label1}_vs_{label2}_Col{col1}".replace(' ','_')
+    #     filename = os.path.join(PLOT_SAVE_DIR, f"{safe_title}.png")
+    #     plot_title = f"High Correlation ({peak_val:.2f})\n{label1}_Col{col1} vs {label2}_Col{col1}"
+    #     plot_cross_correlation(lags, corr, peak_lag, peak_val, plot_title, filename_to_save=filename)
+
+print("\nCorrelation analysis complete.")
+if problematic_correlations_summary:
+     print(f"\n--- Identified Problematic Correlations (Event vs Nothing > {PROBLEM_THRESHOLD}) ---")
+     sorted_problems = sorted(problematic_correlations_summary.items(), key=lambda item: abs(item[1]), reverse=True)
+     for (key1, key2), peak_val in sorted_problems:
+         file1, col1 = key1; file2, col2 = key2; label1 = labels_by_filename.get(file1,'?'); label2 = labels_by_filename.get(file2,'?')
+         print(f"*   Peak={peak_val:.2f} between [{label1}@{file1}_Col{col1}] and [{label2}@{file2}_Col{col2}]")
+     print(f"Updated Problematic Channels: {PROBLEM_CHANNELS}")
+else:
+     print("\nNo significantly high correlations found between events and 'nothing' on the same channel.")
+
+all_available_channels = set(col for _, col in all_source_keys)
+good_channels = sorted(list(all_available_channels - PROBLEM_CHANNELS))
+print(f"\nPotentially Good Channels identified for use: {good_channels}")
+if not good_channels: print("Error: No good channels identified!"); exit()
+print("-" * 30)
+
+# --- 4. מיצוע מיושר (Aligned Averaging on Good Channels) ---
+print("\n--- 4. Performing Aligned Averaging on Good Channels ---")
 averaged_signals = {}
 processed_files_count = 0
 files_to_process = list(data_structured.keys())
 for filename in tqdm(files_to_process, desc="Averaging Files"):
-    # ... (קוד המיצוע המיושר זהה לקוד הקודם) ...
     if filename not in data_structured: continue
-    label = labels_by_filename[filename]; available_cols = sorted(list(data_structured[filename].keys()))
-    good_cols_for_file = [col for col in available_cols if col not in PROBLEM_CHANNELS]
-    if len(good_cols_for_file) < 1: continue
-    elif len(good_cols_for_file) == 1: averaged_signal = data_structured[filename][good_cols_for_file[0]]
+    label = labels_by_filename[filename]
+    available_cols = sorted(list(data_structured[filename].keys()))
+    good_cols_for_file = [col for col in available_cols if col not in PROBLEM_CHANNELS] # Use only good channels
+
+    if len(good_cols_for_file) < 1: continue # Skip if no good channels for this file
+    elif len(good_cols_for_file) == 1:
+        averaged_signal = data_structured[filename][good_cols_for_file[0]]
     else:
         ref_col_idx = good_cols_for_file[0]; signal_ref = data_structured[filename][ref_col_idx]; n_ref = len(signal_ref)
         sum_aligned_signals = np.copy(signal_ref); num_signals_averaged = 1
@@ -98,17 +256,17 @@ for filename in tqdm(files_to_process, desc="Averaging Files"):
             aligned_signal = align_signal(signal_to_align, n_ref, peak_lag_samples)
             sum_aligned_signals += aligned_signal; num_signals_averaged += 1
         if num_signals_averaged > 0: averaged_signal = sum_aligned_signals / num_signals_averaged
-        else: averaged_signal = signal_ref
+        else: averaged_signal = signal_ref # Fallback
     if label not in averaged_signals: averaged_signals[label] = []
     averaged_signals[label].append(averaged_signal); processed_files_count += 1
-print(f"\nFinished averaging. Processed {processed_files_count} files.")
+print(f"\nFinished averaging using {len(good_channels)} good channels per file (where available). Processed {processed_files_count} files.")
+print("-" * 30)
 
-# --- 4. חלוקה לחלונות (כמו בקוד הקודם) ---
-print("\n--- 4. Windowing Averaged Signals ---")
-all_windows = []
-all_window_labels = []
+# --- 5. חלוקה לחלונות (Windowing Averaged Signals) ---
+print("\n--- 5. Windowing Averaged Signals ---")
+all_windows = []; all_window_labels = []
 labels_to_process = list(averaged_signals.keys())
-for label in tqdm(labels_to_process, desc="Windowing Labels"):
+for label in tqdm(labels_to_process, desc="Windowing Labels", leave=False):
     for avg_signal in averaged_signals[label]:
         num_samples = len(avg_signal)
         if num_samples < WINDOW_SIZE_SAMPLES:
@@ -121,344 +279,144 @@ for label in tqdm(labels_to_process, desc="Windowing Labels"):
                 window = avg_signal[start_idx:end_idx]; all_windows.append(window); all_window_labels.append(label)
 print(f"\nFinished windowing. Total windows created: {len(all_windows)}")
 if not all_windows: print("Error: No windows created."); exit()
+print("Window counts per label:")
+unique_labels, counts = np.unique(all_window_labels, return_counts=True)
+for l, c in zip(unique_labels, counts): print(f"- {l}: {c} windows")
+print("-" * 30)
 
-# --- 5. יצירת ספקטוגרמות (כמו בקוד הקודם) ---
-print("\n--- 5. Generating Spectrograms ---")
-all_spectrograms = []
-all_spec_labels = all_window_labels # Keep labels aligned
+# --- 6. יצירת ספקטוגרמות (Generating Spectrograms) ---
+print("\n--- 6. Generating Spectrograms from Windows ---")
+all_spectrograms = []; all_spec_labels = all_window_labels
 for window_signal in tqdm(all_windows, desc="Generating Spectrograms"):
     try:
         frequencies, times, Sxx = sp_signal.spectrogram(window_signal, fs=SAMPLING_RATE, window=WINDOW, nperseg=NPERSEG, noverlap=NOVERLAP, scaling=SCALING, mode=MODE)
-        log_Sxx = 10 * np.log10(Sxx + epsilon); all_spectrograms.append(log_Sxx.astype(np.float32)) # Convert to float32 for PyTorch
+        log_Sxx = 10 * np.log10(Sxx + EPSILON); all_spectrograms.append(log_Sxx.astype(np.float32))
     except Exception as e: tqdm.write(f"Error generating spectrogram: {e}")
 print(f"\nGenerated {len(all_spectrograms)} spectrograms.")
 if not all_spectrograms: print("Error: No spectrograms generated."); exit()
+print("-" * 30)
 
-# --- 6. הכנת נתונים לאימון (Data Preparation for Training) ---
-print("\n--- 6. Preparing Data for Training ---")
-
-# המרת תוויות למספרים
-label_encoder = LabelEncoder()
-encoded_labels = label_encoder.fit_transform(all_spec_labels)
-num_classes = len(label_encoder.classes_)
-print(f"Label encoding: {list(zip(label_encoder.classes_, range(num_classes)))}")
-print(f"Number of classes: {num_classes}")
-
-# הוספת מימד "ערוץ" (1) לספקטוגרמות
-# Input for Conv2d should be (Batch, Channels, Height, Width)
-spectrograms_with_channel = np.array(all_spectrograms)[:, np.newaxis, :, :]
-print(f"Spectrogram shape (with channel): {spectrograms_with_channel.shape}") # Should be (num_samples, 1, num_freq_bins, num_time_bins)
-
-# חלוקה ל-Train, Validation, Test
-X = spectrograms_with_channel
-y = encoded_labels
-
-# First split: Train+Val vs Test
-X_train_val, X_test, y_train_val, y_test = train_test_split(
-    X, y, test_size=TEST_SIZE, random_state=SEED, stratify=y # stratify helps keep class proportions
-)
-
-# Second split: Train vs Validation
-# Adjust validation size based on the remaining data
+# --- 7. הכנת נתונים לאימון (Data Preparation for Training) ---
+print("\n--- 7. Preparing Data for Training ---")
+label_encoder = LabelEncoder(); encoded_labels = label_encoder.fit_transform(all_spec_labels)
+num_classes = len(label_encoder.classes_); class_names = list(label_encoder.classes_)
+print(f"Label encoding: {list(zip(class_names, range(num_classes)))}")
+spectrograms_with_channel = np.array(all_spectrograms)[:, np.newaxis, :, :]; print(f"Spectrogram shape: {spectrograms_with_channel.shape}")
+X = spectrograms_with_channel; y = encoded_labels
+X_train_val, X_test, y_train_val, y_test = train_test_split(X, y, test_size=TEST_SIZE, random_state=SEED, stratify=y)
 val_size_adjusted = VALIDATION_SIZE / (1 - TEST_SIZE)
-X_train, X_val, y_train, y_val = train_test_split(
-    X_train_val, y_train_val, test_size=val_size_adjusted, random_state=SEED, stratify=y_train_val
-)
+X_train, X_val, y_train, y_val = train_test_split(X_train_val, y_train_val, test_size=val_size_adjusted, random_state=SEED, stratify=y_train_val)
+print(f"Data split: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}")
 
-print(f"\nData split:")
-print(f"- Training set: {len(X_train)} samples")
-print(f"- Validation set: {len(X_val)} samples")
-print(f"- Test set: {len(X_test)} samples")
-
-# יצירת PyTorch Datasets
 class SpectrogramDataset(Dataset):
-    def __init__(self, features, labels, transform=None):
-        self.features = torch.from_numpy(features).float()
-        self.labels = torch.from_numpy(labels).long()
-        self.transform = transform # For potential augmentations/normalization
+    def __init__(self, features, labels): self.features = torch.from_numpy(features).float(); self.labels = torch.from_numpy(labels).long()
+    def __len__(self): return len(self.features)
+    def __getitem__(self, idx): return self.features[idx], self.labels[idx]
 
-    def __len__(self):
-        return len(self.features)
-
-    def __getitem__(self, idx):
-        sample = self.features[idx]
-        label = self.labels[idx]
-        if self.transform:
-            sample = self.transform(sample)
-        return sample, label
-
-# --- ניתן להוסיף כאן נרמול או אוגמנטציה אם רוצים ---
-# transform = transforms.Compose([
-#     # transforms.Normalize(mean=[...], std=[...]) # Calculate mean/std on training set
-# ])
-train_dataset = SpectrogramDataset(X_train, y_train)
-val_dataset = SpectrogramDataset(X_val, y_val)
-test_dataset = SpectrogramDataset(X_test, y_test)
-
-# יצירת DataLoaders
+train_dataset = SpectrogramDataset(X_train, y_train); val_dataset = SpectrogramDataset(X_val, y_val); test_dataset = SpectrogramDataset(X_test, y_test)
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
-
-print("\nDataLoaders created.")
+print("PyTorch Datasets and DataLoaders created.")
 print("-" * 30)
 
-
-# --- 7. הגדרת מודל CNN (Simple Example) ---
-print("\n--- 7. Defining CNN Model ---")
-
+# --- 8. הגדרת מודל CNN (CNN Model Definition) ---
+print("\n--- 8. Defining CNN Model ---")
 class SimpleCNN(nn.Module):
     def __init__(self, num_classes, input_height, input_width):
         super(SimpleCNN, self).__init__()
-        self.conv_block1 = nn.Sequential(
-            nn.Conv2d(in_channels=1, out_channels=16, kernel_size=3, stride=1, padding=1), # Input channel = 1
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2) # Halves height and width
-        )
-        self.conv_block2 = nn.Sequential(
-            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2)
-        )
-        self.conv_block3 = nn.Sequential(
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2)
-        )
+        self.conv_block1 = nn.Sequential(nn.Conv2d(1, 16, 3, 1, 1), nn.BatchNorm2d(16), nn.ReLU(), nn.MaxPool2d(2, 2))
+        self.conv_block2 = nn.Sequential(nn.Conv2d(16, 32, 3, 1, 1), nn.BatchNorm2d(32), nn.ReLU(), nn.MaxPool2d(2, 2))
+        self.conv_block3 = nn.Sequential(nn.Conv2d(32, 64, 3, 1, 1), nn.BatchNorm2d(64), nn.ReLU(), nn.MaxPool2d(2, 2))
+        # Calculate flattened size dynamically
+        dummy_input = torch.randn(1, 1, input_height, input_width)
+        dummy_output = self.conv_block3(self.conv_block2(self.conv_block1(dummy_input)))
+        self.flattened_size = int(np.prod(dummy_output.shape))
 
-        # חישוב גודל הקלט לשכבה הלינארית אחרי שכבות ה-Conv/Pool
-        # הגובה והרוחב מצטמצמים פי 2 שלוש פעמים (2*2*2 = 8)
-        flattened_height = input_height // 8
-        flattened_width = input_width // 8
-        self.flattened_size = 64 * flattened_height * flattened_width
+        self.fc_block = nn.Sequential(nn.Flatten(), nn.Linear(self.flattened_size, 128), nn.ReLU(), nn.Dropout(0.5), nn.Linear(128, num_classes))
+    def forward(self, x): x = self.conv_block1(x); x = self.conv_block2(x); x = self.conv_block3(x); x = self.fc_block(x); return x
 
-        self.fc_block = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(self.flattened_size, 128),
-            nn.ReLU(),
-            nn.Dropout(0.5), # Dropout for regularization
-            nn.Linear(128, num_classes) # Output layer
-        )
-
-    def forward(self, x):
-        # print("Input shape:", x.shape) # Debug shape
-        x = self.conv_block1(x)
-        # print("After conv1 shape:", x.shape)
-        x = self.conv_block2(x)
-        # print("After conv2 shape:", x.shape)
-        x = self.conv_block3(x)
-        # print("After conv3 shape:", x.shape)
-        if x.shape[1] * x.shape[2] * x.shape[3] != self.flattened_size:
-             print(f"Warning: Actual flattened size {x.shape[1]*x.shape[2]*x.shape[3]} != calculated {self.flattened_size}")
-             # Fallback - adaptive pooling or recalculate
-             # For now, let's see if it works as calculated
-             # Or use AdaptiveAvgPool2d
-             # pool = nn.AdaptiveAvgPool2d((1,1))
-             # x = pool(x)
-             # self.flattened_size = 64 # Adjust if using adaptive pool
-             pass # Let the flatten/linear layer handle it or raise error
-
-        x = self.fc_block(x)
-        # print("Output shape:", x.shape)
-        return x
-
-# יצירת המודל
-# קבלת גודל הספקטוגרמה מהדגימה הראשונה
-spec_height = spectrograms_with_channel.shape[2]
-spec_width = spectrograms_with_channel.shape[3]
+spec_height = spectrograms_with_channel.shape[2]; spec_width = spectrograms_with_channel.shape[3]
 model = SimpleCNN(num_classes=num_classes, input_height=spec_height, input_width=spec_width)
-
-# העברת המודל ל-GPU אם זמין
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu"); model.to(device)
 print(f"Model defined and moved to {device}.")
-# הדפסת המבנה (אופציונלי)
-# print(model)
+# print(model) # Uncomment to print model structure
 print("-" * 30)
 
-
-# --- 8. הגדרת אימון (Loss, Optimizer) ---
-print("\n--- 8. Setting up Training ---")
-criterion = nn.CrossEntropyLoss() # מתאים לסיווג רב-קלאסי
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-# אפשר להוסיף Scheduler להורדת קצב למידה (ראה גרף LR מקורי)
-scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.1) # Example: reduce LR every 20 epochs
-
-print("Loss function: CrossEntropyLoss")
-print(f"Optimizer: Adam (LR={LEARNING_RATE})")
-print(f"Scheduler: StepLR (step=20, gamma=0.1)")
+# --- 9. הגדרת אימון (Training Setup) ---
+print("\n--- 9. Setting up Training ---")
+criterion = nn.CrossEntropyLoss(); optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.1)
+print("Loss: CrossEntropyLoss, Optimizer: Adam, Scheduler: StepLR")
 print("-" * 30)
 
-# --- 9. לולאת אימון ואימות (Training and Validation Loop) ---
-print("\n--- 9. Starting Training ---")
-train_losses, val_losses = [], []
-train_accuracies, val_accuracies = [], []
-best_val_accuracy = 0.0
-epochs_no_improve = 0
-training_start_time = time.time()
+# --- 10. לולאת אימון ואימות (Training and Validation Loop) ---
+print("\n--- 10. Starting Training ---")
+history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
+best_val_accuracy = 0.0; epochs_no_improve = 0; training_start_time = time.time()
 
 for epoch in range(NUM_EPOCHS):
-    epoch_start_time = time.time()
-    # --- שלב האימון ---
-    model.train() # מעבר למצב אימון
-    running_loss = 0.0
-    correct_train = 0
-    total_train = 0
-
+    epoch_start_time = time.time(); model.train(); running_loss = 0.0; correct_train = 0; total_train = 0
     train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{NUM_EPOCHS} [Train]", leave=False)
     for inputs, labels in train_pbar:
-        inputs, labels = inputs.to(device), labels.to(device)
+        inputs, labels = inputs.to(device), labels.to(device); optimizer.zero_grad()
+        outputs = model(inputs); loss = criterion(outputs, labels); loss.backward(); optimizer.step()
+        running_loss += loss.item() * inputs.size(0); _, predicted = torch.max(outputs.data, 1)
+        total_train += labels.size(0); correct_train += (predicted == labels).sum().item()
+        train_pbar.set_postfix({'Loss': loss.item()})
+    epoch_train_loss = running_loss / len(train_loader.dataset); epoch_train_acc = 100.0 * correct_train / total_train
+    history['train_loss'].append(epoch_train_loss); history['train_acc'].append(epoch_train_acc)
 
-        # איפוס גרדיאנטים
-        optimizer.zero_grad()
-
-        # Forward pass
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
-
-        # Backward pass and optimization
-        loss.backward()
-        optimizer.step()
-
-        # סטטיסטיקות
-        running_loss += loss.item() * inputs.size(0)
-        _, predicted = torch.max(outputs.data, 1)
-        total_train += labels.size(0)
-        correct_train += (predicted == labels).sum().item()
-        train_pbar.set_postfix({'Loss': loss.item()}) # Show loss in progress bar
-
-    epoch_train_loss = running_loss / len(train_loader.dataset)
-    epoch_train_acc = 100.0 * correct_train / total_train
-    train_losses.append(epoch_train_loss)
-    train_accuracies.append(epoch_train_acc)
-
-    # --- שלב האימות ---
-    model.eval() # מעבר למצב הערכה (מכבה Dropout, BatchNorm מתנהג אחרת)
-    running_val_loss = 0.0
-    correct_val = 0
-    total_val = 0
-
+    model.eval(); running_val_loss = 0.0; correct_val = 0; total_val = 0
     val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{NUM_EPOCHS} [Val]", leave=False)
-    with torch.no_grad(): # לא מחשבים גרדיאנטים באימות
+    with torch.no_grad():
         for inputs, labels in val_pbar:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-
-            running_val_loss += loss.item() * inputs.size(0)
-            _, predicted = torch.max(outputs.data, 1)
-            total_val += labels.size(0)
-            correct_val += (predicted == labels).sum().item()
+            inputs, labels = inputs.to(device), labels.to(device); outputs = model(inputs); loss = criterion(outputs, labels)
+            running_val_loss += loss.item() * inputs.size(0); _, predicted = torch.max(outputs.data, 1)
+            total_val += labels.size(0); correct_val += (predicted == labels).sum().item()
             val_pbar.set_postfix({'Loss': loss.item()})
+    epoch_val_loss = running_val_loss / len(val_loader.dataset); epoch_val_acc = 100.0 * correct_val / total_val
+    history['val_loss'].append(epoch_val_loss); history['val_acc'].append(epoch_val_acc)
 
-    epoch_val_loss = running_val_loss / len(val_loader.dataset)
-    epoch_val_acc = 100.0 * correct_val / total_val
-    val_losses.append(epoch_val_loss)
-    val_accuracies.append(epoch_val_acc)
+    current_lr = optimizer.param_groups[0]['lr']; scheduler.step(); epoch_duration = time.time() - epoch_start_time
+    print(f"Epoch {epoch+1}/{NUM_EPOCHS} [{epoch_duration:.1f}s] - LR: {current_lr:.1e} - Train Loss: {epoch_train_loss:.4f}, Acc: {epoch_train_acc:.2f}% - Val Loss: {epoch_val_loss:.4f}, Acc: {epoch_val_acc:.2f}%")
 
-    # עדכון קצב למידה (אם יש Scheduler)
-    current_lr = optimizer.param_groups[0]['lr']
-    scheduler.step()
-
-    epoch_duration = time.time() - epoch_start_time
-    print(f"Epoch {epoch+1}/{NUM_EPOCHS} [{epoch_duration:.1f}s] - "
-          f"LR: {current_lr:.1e} - "
-          f"Train Loss: {epoch_train_loss:.4f}, Train Acc: {epoch_train_acc:.2f}% - "
-          f"Val Loss: {epoch_val_loss:.4f}, Val Acc: {epoch_val_acc:.2f}%")
-
-    # --- בדיקת שיפור ושמירת המודל הטוב ביותר ---
     if epoch_val_acc > best_val_accuracy:
-        print(f"  Validation accuracy improved ({best_val_accuracy:.2f}% -> {epoch_val_acc:.2f}%). Saving model...")
-        best_val_accuracy = epoch_val_acc
-        # שמירת המודל
-        model_save_path = "best_cnn_model.pth"
-        torch.save(model.state_dict(), model_save_path)
-        epochs_no_improve = 0 # אפס מונה המתנה
+        print(f"  Validation accuracy improved ({best_val_accuracy:.2f}% -> {epoch_val_acc:.2f}%). Saving model to {MODEL_SAVE_PATH}...")
+        best_val_accuracy = epoch_val_acc; torch.save(model.state_dict(), MODEL_SAVE_PATH); epochs_no_improve = 0
     else:
-        epochs_no_improve += 1
-        print(f"  Validation accuracy did not improve for {epochs_no_improve} epoch(s). Best: {best_val_accuracy:.2f}%")
-
-    # --- Early Stopping ---
-    if epochs_no_improve >= PATIENCE:
-        print(f"\nEarly stopping triggered after {epoch+1} epochs.")
-        break
+        epochs_no_improve += 1; print(f"  Val acc did not improve for {epochs_no_improve} epoch(s). Best: {best_val_accuracy:.2f}%")
+    if epochs_no_improve >= PATIENCE: print(f"\nEarly stopping triggered after {epoch+1} epochs."); break
 
 training_duration = time.time() - training_start_time
-print(f"\n--- Training Finished ({training_duration / 60:.1f} minutes) ---")
-print(f"Best Validation Accuracy achieved: {best_val_accuracy:.2f}%")
+print(f"\n--- Training Finished ({training_duration / 60:.1f} minutes) ---"); print(f"Best Validation Accuracy: {best_val_accuracy:.2f}%"); print("-" * 30)
+
+# --- 11. הערכה סופית (Final Evaluation on Test Set) ---
+print("\n--- 11. Evaluating on Test Set ---")
+if not os.path.exists(MODEL_SAVE_PATH):
+     print(f"Error: Best model file not found at {MODEL_SAVE_PATH}. Skipping test evaluation.")
+else:
+    print(f"Loading best model from {MODEL_SAVE_PATH}..."); model.load_state_dict(torch.load(MODEL_SAVE_PATH)); model.to(device); model.eval()
+    all_preds = []; all_labels = []
+    with torch.no_grad():
+        for inputs, labels in tqdm(test_loader, desc="Testing"):
+            inputs, labels = inputs.to(device), labels.to(device); outputs = model(inputs); _, predicted = torch.max(outputs.data, 1)
+            all_preds.extend(predicted.cpu().numpy()); all_labels.extend(labels.cpu().numpy())
+    test_accuracy = accuracy_score(all_labels, all_preds); print(f"\nTest Accuracy: {test_accuracy * 100.0:.2f}%")
+    print("\nClassification Report:"); print(classification_report(all_labels, all_preds, target_names=class_names))
+    print("\nConfusion Matrix:"); cm = confusion_matrix(all_labels, all_preds)
+    plt.figure(figsize=(8, 6)); sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel('Predicted Label'); plt.ylabel('True Label'); plt.title('Confusion Matrix - Test Set'); plt.show()
 print("-" * 30)
 
-# --- 10. הערכה סופית על קבוצת המבחן (Test Set Evaluation) ---
-print("\n--- 10. Evaluating on Test Set ---")
-
-# טען את המודל הטוב ביותר שנשמר
-print(f"Loading best model from {model_save_path}...")
-model.load_state_dict(torch.load(model_save_path))
-model.to(device) # ודא שהמודל על המכשיר הנכון
-model.eval() # מצב הערכה
-
-all_preds = []
-all_labels = []
-
-with torch.no_grad():
-    for inputs, labels in tqdm(test_loader, desc="Testing"):
-        inputs, labels = inputs.to(device), labels.to(device)
-        outputs = model(inputs)
-        _, predicted = torch.max(outputs.data, 1)
-
-        all_preds.extend(predicted.cpu().numpy()) # העבר ל-CPU והמר ל-numpy
-        all_labels.extend(labels.cpu().numpy())
-
-# חישוב מדדי ביצועים
-test_accuracy = accuracy_score(all_labels, all_preds)
-print(f"\nTest Accuracy: {test_accuracy * 100.0:.2f}%")
-
-print("\nClassification Report:")
-# קבלת שמות התוויות מה-encoder
-class_names = label_encoder.classes_
-print(classification_report(all_labels, all_preds, target_names=class_names))
-
-print("\nConfusion Matrix:")
-cm = confusion_matrix(all_labels, all_preds)
-plt.figure(figsize=(8, 6))
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
-plt.xlabel('Predicted Label')
-plt.ylabel('True Label')
-plt.title('Confusion Matrix - Test Set')
-plt.show()
-print("-" * 30)
-
-# --- 11. הצגת גרפי אימון (Training Curves) ---
-print("\n--- 11. Plotting Training Curves ---")
-
-epochs_range = range(1, len(train_losses) + 1)
-
+# --- 12. הצגת גרפי אימון (Plotting Training Curves) ---
+print("\n--- 12. Plotting Training Curves ---")
+epochs_range = range(1, len(history['train_loss']) + 1)
 plt.figure(figsize=(12, 5))
-
-# גרף Loss
-plt.subplot(1, 2, 1)
-plt.plot(epochs_range, train_losses, label='Training Loss')
-plt.plot(epochs_range, val_losses, label='Validation Loss')
-plt.xlabel('Epochs')
-plt.ylabel('Loss')
-plt.title('Training and Validation Loss')
-plt.legend()
-plt.grid(True)
-
-# גרף Accuracy
-plt.subplot(1, 2, 2)
-plt.plot(epochs_range, train_accuracies, label='Training Accuracy')
-plt.plot(epochs_range, val_accuracies, label='Validation Accuracy')
-plt.xlabel('Epochs')
-plt.ylabel('Accuracy (%)')
-plt.title('Training and Validation Accuracy')
-plt.legend()
-plt.grid(True)
-
-plt.tight_layout()
+plt.subplot(1, 2, 1); plt.plot(epochs_range, history['train_loss'], label='Training Loss'); plt.plot(epochs_range, history['val_loss'], label='Validation Loss'); plt.xlabel('Epochs'); plt.ylabel('Loss'); plt.title('Loss'); plt.legend(); plt.grid(True)
+plt.subplot(1, 2, 2); plt.plot(epochs_range, history['train_acc'], label='Training Accuracy'); plt.plot(epochs_range, history['val_acc'], label='Validation Accuracy'); plt.xlabel('Epochs'); plt.ylabel('Accuracy (%)'); plt.title('Accuracy'); plt.legend(); plt.grid(True)
+plt.suptitle('Training and Validation Metrics')
+plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 plt.show()
 
-print("\n--- Full Process Complete ---")
+print("\n--- Full Pipeline Complete ---")
