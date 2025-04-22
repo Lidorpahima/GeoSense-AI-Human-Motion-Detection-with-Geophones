@@ -12,7 +12,7 @@ DATA_DIR = 'data'  # התיקייה שמכילה את קבצי ה-CSV
 SAMPLING_RATE = 1000 # Hz (קצב הדגימה של הגאופונים)
 # --------------------
 
-# --- פונקציות טעינה וקורלציה (מהקוד הקודם, ללא שינוי מהותי) ---
+# --- פונקציות טעינה וקורלציה (זהות לקוד הקודם) ---
 def get_label_from_filename(filename):
     filename_lower = filename.lower()
     if 'nothing' in filename_lower: return 'nothing'
@@ -55,6 +55,7 @@ for fname, cols_dict in data_structured.items():
     print(f"- File: {fname} (Label: {labels_by_filename[fname]}), Columns loaded: {list(cols_dict.keys())}")
 
 def calculate_cross_correlation(sig1, sig2, sampling_rate):
+    # ... (פונקציה זהה) ...
     sig1 = np.asarray(sig1, dtype=np.float64)
     sig2 = np.asarray(sig2, dtype=np.float64)
     sig1 = np.nan_to_num(sig1); sig2 = np.nan_to_num(sig2)
@@ -78,6 +79,7 @@ def calculate_cross_correlation(sig1, sig2, sampling_rate):
     return lags_ms, normalized_correlation, peak_lag_ms, peak_value
 
 def plot_cross_correlation(lags_ms, correlation, peak_lag_ms, peak_value, title):
+    # ... (פונקציה זהה) ...
     if lags_ms is None or correlation is None: return
     plt.figure(figsize=(12, 5))
     plt.plot(lags_ms, correlation, label='Cross-correlation value', linewidth=1.5)
@@ -88,49 +90,57 @@ def plot_cross_correlation(lags_ms, correlation, peak_lag_ms, peak_value, title)
     plt.title(title, fontsize=12); plt.xlabel('Lag (ms)', fontsize=12); plt.ylabel('Normalized Cross-correlation [-1, 1]', fontsize=12)
     plt.ylim([-1.1, 1.1]); plt.legend(); plt.grid(True, linestyle=':'); plt.tight_layout()
 
-# --- חדש: פונקציות עזר לניתוח ספקטרלי וסינון ---
+# --- פונקציות עזר לניתוח ספקטרלי וסינון (כולל Band-pass) ---
 def plot_signal(signal, time_vector, title, ax=None):
-    """מציגה גרף של אות בזמן"""
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(12, 4))
-    ax.plot(time_vector, signal, linewidth=1)
-    ax.set_title(title, fontsize=12)
-    ax.set_xlabel("Time (s)", fontsize=10)
-    ax.set_ylabel("Amplitude", fontsize=10)
-    ax.grid(True, linestyle=':')
+    # ... (פונקציה זהה) ...
+    if ax is None: fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(time_vector, signal, linewidth=1); ax.set_title(title, fontsize=12)
+    ax.set_xlabel("Time (s)", fontsize=10); ax.set_ylabel("Amplitude", fontsize=10)
+    ax.grid(True, linestyle=':');
     if ax is None: plt.tight_layout()
 
 def plot_psd(signal, fs, title, ax=None, max_freq=None):
-    """מחשבת ומציגה Power Spectral Density (PSD)"""
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 5))
-    # שימוש ב-Welch's method להערכת PSD יציבה יותר
-    frequencies, psd = sp_signal.welch(signal, fs, nperseg=fs*2, noverlap=fs, scaling='density') # Adjust nperseg/noverlap as needed
-    ax.semilogy(frequencies, psd, linewidth=1) # Use log scale for Y axis
-    ax.set_title(title, fontsize=12)
-    ax.set_xlabel('Frequency (Hz)', fontsize=10)
-    ax.set_ylabel('PSD (Unit^2/Hz)', fontsize=10) # Adjust unit based on signal
-    if max_freq:
-         ax.set_xlim(0, max_freq)
-    ax.grid(True, which='both', linestyle=':') # Grid for both major and minor ticks
+    # ... (פונקציה זהה) ...
+    if ax is None: fig, ax = plt.subplots(figsize=(10, 5))
+    frequencies, psd = sp_signal.welch(signal, fs, nperseg=min(fs*2, len(signal)), noverlap=min(fs, len(signal)//2), scaling='density') # More robust nperseg/noverlap
+    ax.semilogy(frequencies, psd, linewidth=1); ax.set_title(title, fontsize=12)
+    ax.set_xlabel('Frequency (Hz)', fontsize=10); ax.set_ylabel('PSD (Unit^2/Hz)', fontsize=10)
+    if max_freq: ax.set_xlim(0, max_freq)
+    ax.grid(True, which='both', linestyle=':');
     if ax is None: plt.tight_layout()
 
-def apply_notch_filter(data, noisy_freq, quality_factor, fs):
-    """מחילה מסנן Notch על האות"""
-    if noisy_freq <= 0 or noisy_freq >= fs/2:
-         print(f"Warning: Invalid notch frequency {noisy_freq} Hz for sampling rate {fs} Hz. Skipping filtering.")
+# --- חדש: פונקציה למסנן Band-pass ---
+def apply_bandpass_filter(data, lowcut, highcut, fs, order=4):
+    """מחילה מסנן Band-pass מסוג Butterworth על האות"""
+    nyquist = 0.5 * fs
+    low = lowcut / nyquist
+    high = highcut / nyquist
+
+    # בדוק תקינות תדרים
+    if low <= 0 and high >= 1: # No filtering needed if it covers the whole range
+        print("Warning: Bandpass range covers all frequencies. Skipping filtering.")
+        return data
+    elif low <= 0: # Effectively a low-pass filter
+        print(f"Info: Applying Low-pass filter (cutoff={highcut} Hz)")
+        b, a = sp_signal.butter(order, high, btype='low', analog=False)
+    elif high >= 1: # Effectively a high-pass filter
+        print(f"Info: Applying High-pass filter (cutoff={lowcut} Hz)")
+        b, a = sp_signal.butter(order, low, btype='high', analog=False)
+    elif low >= high:
+         print(f"Error: Lowcut frequency ({lowcut}) must be lower than Highcut frequency ({highcut}). Skipping filtering.")
          return data
-    # Design notch filter
-    b, a = sp_signal.iirnotch(noisy_freq, quality_factor, fs)
+    else: # Standard band-pass filter
+         b, a = sp_signal.butter(order, [low, high], btype='band', analog=False)
+
     # Apply filter using filtfilt for zero phase distortion
     filtered_data = sp_signal.filtfilt(b, a, data)
     return filtered_data
 
 # --- ניתוח ספציפי: אדם מול שקט (גאופון 0) ---
 
-print("\n--- Analyzing Human vs. Nothing (Column 0) ---")
+print("\n--- Analyzing Human vs. Nothing (Column 0) with Bandpass Filter ---")
 
-# 1. בחירת האותות הרלוונטיים
+# 1. בחירת האותות הרלוונטיים (כמו קודם)
 human_file = next((f for f in data_structured if 'human' in f.lower() and 'nothing' not in f.lower()), None)
 nothing_file = next((f for f in data_structured if 'nothing' in f.lower()), None)
 
@@ -156,56 +166,43 @@ else:
 # המשך רק אם שני האותות נמצאו
 if signal_human_col0 is not None and signal_nothing_col0 is not None:
 
-    # 2. ניתוח לפני סינון
-    print("\n--- Analysis BEFORE Filtering ---")
-    fig_before, axs_before = plt.subplots(2, 2, figsize=(15, 10))
-    fig_before.suptitle('Analysis BEFORE Filtering (Human vs Nothing - Col 0)', fontsize=16)
+    # --- 2. הגדרת פרמטרי סינון Band-pass ויישום ---
+    # !!! **התאם את התדרים האלה לפי ההבנה שלך מה-PSD המקורי!** !!!
+    LOW_CUTOFF = 5.0  # Hz (תדר נמוך לחתוך מתחתיו)
+    HIGH_CUTOFF = 150.0 # Hz (תדר גבוה לחתוך מעליו)
+    FILTER_ORDER = 4   # סדר המסנן (משפיע על התלילות של החיתוך)
 
-    # הצגת אותות בזמן
-    plot_signal(signal_human_col0, time_vector_human, f"Original Human Signal ({human_file} Col0)", ax=axs_before[0, 0])
-    plot_signal(signal_nothing_col0, time_vector_nothing, f"Original Nothing Signal ({nothing_file} Col0)", ax=axs_before[0, 1])
+    print(f"\n--- Applying Bandpass Filter ({LOW_CUTOFF} Hz - {HIGH_CUTOFF} Hz) ---")
+    filtered_human_bp = apply_bandpass_filter(signal_human_col0, LOW_CUTOFF, HIGH_CUTOFF, SAMPLING_RATE, order=FILTER_ORDER)
+    filtered_nothing_bp = apply_bandpass_filter(signal_nothing_col0, LOW_CUTOFF, HIGH_CUTOFF, SAMPLING_RATE, order=FILTER_ORDER)
 
-    # הצגת PSD
-    # הגבל את תצוגת התדרים לתחום מעניין (למשל, עד 200Hz) כדי לראות טוב יותר רעשי רשת
-    plot_psd(signal_human_col0, SAMPLING_RATE, "PSD - Original Human", ax=axs_before[1, 0], max_freq=200)
-    plot_psd(signal_nothing_col0, SAMPLING_RATE, "PSD - Original Nothing", ax=axs_before[1, 1], max_freq=200)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout
-    plt.show() # הצג את הגרפים האלה קודם
-
-    # הצגת קרוס-קורלציה מקורית
-    lags, corr, peak_lag, peak_val = calculate_cross_correlation(signal_human_col0, signal_nothing_col0, SAMPLING_RATE)
-    plot_cross_correlation(lags, corr, peak_lag, peak_val, f"Cross-Correlation BEFORE Filtering\nHuman Col0 vs Nothing Col0")
-    if peak_val is not None: print(f"Peak Correlation BEFORE Filtering: {peak_val:.2f}")
-    plt.show() # הצג גם את זה
-
-    # 3. הגדרת פרמטרי סינון ויישום
-    # !!! **בדוק את גרפי ה-PSD!** אם אתה רואה פיק ברור ב-60Hz, שנה ל-60. !!!
-    NOISY_FREQ = 50.0  # Hz (התדר שזוהה ב-PSD להסרה)
-    QUALITY_FACTOR = 30.0 # גורם איכות למסנן Notch (ערך גבוה = חריץ צר יותר)
-
-    print(f"\n--- Applying Notch Filter at {NOISY_FREQ} Hz ---")
-    filtered_human_col0 = apply_notch_filter(signal_human_col0, NOISY_FREQ, QUALITY_FACTOR, SAMPLING_RATE)
-    filtered_nothing_col0 = apply_notch_filter(signal_nothing_col0, NOISY_FREQ, QUALITY_FACTOR, SAMPLING_RATE)
-
-    # --- 4. ניתוח אחרי סינון ---
-    print("\n--- Analysis AFTER Filtering ---")
-    fig_after, axs_after = plt.subplots(2, 2, figsize=(15, 10))
-    fig_after.suptitle(f'Analysis AFTER Notch Filter ({NOISY_FREQ} Hz) (Human vs Nothing - Col 0)', fontsize=16)
+    # --- 3. ניתוח אחרי סינון Band-pass ---
+    print("\n--- Analysis AFTER Bandpass Filtering ---")
+    fig_after_bp, axs_after_bp = plt.subplots(2, 2, figsize=(15, 10))
+    title_suffix = f"({LOW_CUTOFF}-{HIGH_CUTOFF} Hz BP Filter)"
+    fig_after_bp.suptitle(f'Analysis AFTER Bandpass Filter {title_suffix} (Human vs Nothing - Col 0)', fontsize=16)
 
     # הצגת אותות מסוננים בזמן
-    plot_signal(filtered_human_col0, time_vector_human, f"Filtered Human Signal ({human_file} Col0)", ax=axs_after[0, 0])
-    plot_signal(filtered_nothing_col0, time_vector_nothing, f"Filtered Nothing Signal ({nothing_file} Col0)", ax=axs_after[0, 1])
+    plot_signal(filtered_human_bp, time_vector_human, f"Filtered Human Signal {title_suffix}", ax=axs_after_bp[0, 0])
+    plot_signal(filtered_nothing_bp, time_vector_nothing, f"Filtered Nothing Signal {title_suffix}", ax=axs_after_bp[0, 1])
 
     # הצגת PSD מסונן
-    plot_psd(filtered_human_col0, SAMPLING_RATE, "PSD - Filtered Human", ax=axs_after[1, 0], max_freq=200)
-    plot_psd(filtered_nothing_col0, SAMPLING_RATE, "PSD - Filtered Nothing", ax=axs_after[1, 1], max_freq=200)
+    # הגבל תצוגה כדי לראות את אזור ה-Passband טוב יותר
+    plot_psd(filtered_human_bp, SAMPLING_RATE, f"PSD - Filtered Human {title_suffix}", ax=axs_after_bp[1, 0], max_freq=HIGH_CUTOFF + 50)
+    plot_psd(filtered_nothing_bp, SAMPLING_RATE, f"PSD - Filtered Nothing {title_suffix}", ax=axs_after_bp[1, 1], max_freq=HIGH_CUTOFF + 50)
+    # הדגשת אזור ה-Passband ב-PSD
+    axs_after_bp[1, 0].axvspan(LOW_CUTOFF, HIGH_CUTOFF, color='green', alpha=0.1, label='Passband')
+    axs_after_bp[1, 1].axvspan(LOW_CUTOFF, HIGH_CUTOFF, color='green', alpha=0.1, label='Passband')
+    axs_after_bp[1, 0].legend(loc='lower left')
+    axs_after_bp[1, 1].legend(loc='lower left')
+
     plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout
     plt.show() # הצג את הגרפים האלה
 
-    # הצגת קרוס-קורלציה *אחרי* סינון
-    lags_filt, corr_filt, peak_lag_filt, peak_val_filt = calculate_cross_correlation(filtered_human_col0, filtered_nothing_col0, SAMPLING_RATE)
-    plot_cross_correlation(lags_filt, corr_filt, peak_lag_filt, peak_val_filt, f"Cross-Correlation AFTER Notch Filter ({NOISY_FREQ} Hz)\nHuman Col0 vs Nothing Col0")
-    if peak_val_filt is not None: print(f"Peak Correlation AFTER Filtering: {peak_val_filt:.2f}")
+    # --- 4. הצגת קרוס-קורלציה *אחרי* סינון Band-pass ---
+    lags_bp, corr_bp, peak_lag_bp, peak_val_bp = calculate_cross_correlation(filtered_human_bp, filtered_nothing_bp, SAMPLING_RATE)
+    plot_cross_correlation(lags_bp, corr_bp, peak_lag_bp, peak_val_bp, f"Cross-Correlation AFTER Bandpass Filter {title_suffix}\nHuman Col0 vs Nothing Col0")
+    if peak_val_bp is not None: print(f"Peak Correlation AFTER Bandpass Filtering: {peak_val_bp:.2f}")
     plt.show() # הצג את הגרף הסופי
 
 else:
