@@ -85,25 +85,6 @@ This project presents an end-to-end pipeline for classifying events (e.g., 'huma
 
 ---
 
-## ⚙️ Installation & Setup
-
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/your-username/your-repo-name.git 
-    # Replace with your actual repo URL
-    cd your-repo-name
-    ```
-2.  **Create a virtual environment (recommended):**
-    ```bash
-    python -m venv venv
-    source venv/bin/activate  # On Windows use `venv\Scripts\activate`
-    ```
-3.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt 
-    ```
----
-
 <p align="center">
   <i>Leveraging Deep Learning and Signal Processing for Accurate Geophone Event Classification.</i>
 </p>
