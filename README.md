@@ -3,17 +3,13 @@
 [![Python Version](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Framework](https://img.shields.io/badge/Framework-PyTorch-EE4C2C.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) 
-<!-- Add a LICENSE file (e.g., MIT) to your repo -->
-<!-- Optional: Add Elbit badge if appropriate -->
-<!-- [![Collaboration](https://img.shields.io/badge/Collaboration-Elbit%20Systems%20Context-orange.svg)](https://elbitsystems.com) -->
+[![Collaboration](https://img.shields.io/badge/Collaboration-Elbit%20Systems%20Context-orange.svg)](https://elbitsystems.com)
 
 ---
 
 ## 📜 Overview
 
 This project presents an end-to-end pipeline for classifying events (e.g., 'human', 'car', 'nothing') based on time-series data collected from geophone sensors. Utilizing **PyTorch**, the core of the solution is a custom **Convolutional Neural Network (CNN)** enhanced with a **Spatial Attention mechanism**. The pipeline handles raw signal processing, feature extraction via **Log Power Spectrograms**, advanced data augmentation, model training, and evaluation, achieving high classification accuracy even in potentially noisy environments.
-
-*(Optional: Add context if applicable)* This work was inspired by challenges faced in real-world sensor classification scenarios, similar to those encountered by organizations like Elbit Systems, aiming to significantly improve detection reliability compared to baseline methods.
 
 ---
 
@@ -83,11 +79,9 @@ This project presents an end-to-end pipeline for classifying events (e.g., 'huma
     ```
 
 *   **Confusion Matrix (Test Set):**
-    *(Insert image of your confusion matrix here)*
-    ```
-    ![Test Confusion Matrix](path/to/your/confusion_matrix_test.png) 
-    ```
-*   *(Optional: Mention improvement if applicable)* This result represents a significant improvement over baseline methods [mention baseline if known, e.g., the ~46% figure discussed].
+
+    ![Test Confusion Matrix](confmatrix.png) 
+
 
 ---
 
@@ -108,42 +102,6 @@ This project presents an end-to-end pipeline for classifying events (e.g., 'huma
     ```bash
     pip install -r requirements.txt 
     ```
-    *(**Action Needed:** Generate `requirements.txt` using `pip freeze > requirements.txt` in your project environment)*
-
----
-
-## 🚀 Usage
-
-*(**Action Needed:** Provide instructions on how to run your code. Below are examples, please adapt them.)*
-
-*   **Data Preparation:**
-    *(Explain any steps needed to place or prepare the data)*
-    ```bash
-    # Example: python prepare_data.py --raw_data_dir path/to/raw --output_dir path/to/processed
-    ```
-*   **Training the Model:**
-    ```bash
-    # Example: python train.py --data_dir path/to/processed --save_dir path/to/models --epochs 100
-    ```
-*   **Evaluating the Model:**
-    ```bash
-    # Example: python evaluate.py --model_path path/to/models/best_model.pth --data_dir path/to/processed 
-    ```
-*   **Notebooks:** Explore the `notebooks/` directory (if you have one) for detailed analysis and experiments.
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 🙏 Acknowledgements (Optional)
-
-*   *(Optional: Mention Elbit Systems if the context is appropriate and permitted)*
-*   Thanks to the creators of PyTorch, SciPy, Scikit-learn and other libraries used in this project.
-
 ---
 
 <p align="center">
