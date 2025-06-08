@@ -1,44 +1,68 @@
-from graphviz import Digraph
+import torch
+import torch.nn as nn
+from torchsummary import summary # ייבוא החבילה
 
-# Create a new directed graph
-dot = Digraph(comment='DCAE Encoder Architecture')
-dot.attr(rankdir='LR') # Left to Right layout, אפשר גם 'TB' ל-Top to Bottom
+# --- הגדרות גלובליות (כמו בקוד שלך, רק הרלוונטיות ל-Encoder) ---
+SEQUENCE_LENGTH = 500
+ENCODING_DIM_AE = 64
+AE_DROPOUT_RATE = 0.3
 
-# Define nodes (boxes)
-dot.node('A', 'Input Sequence\n(Length: 500, Channels: 1)')
-dot.node('B', 'Conv Block 1\n(Dilation: 1, Out: 32)\nConv1D->GroupNorm->ReLU->Dropout')
-dot.node('C', 'Conv Block 2\n(Dilation: 2, Out: 64)\nConv1D->GroupNorm->ReLU->Dropout')
-dot.node('D', 'Conv Block 3\n(Dilation: 4, Out: 128)\nConv1D->GroupNorm->ReLU->Dropout')
-dot.node('E', 'Conv Block 4\n(Dilation: 8, Out: 256)\nConv1D->GroupNorm->ReLU->Dropout')
-dot.node('F', 'AdaptiveAvgPool1d\n(Target Output: 1)')
-dot.node('G', 'Linear (fc_encoded)\n(Output Features: 64)')
-dot.node('H', 'Latent Representation\n(Size: 64)')
+# --- הגדרות המודל (העתקתי את ה-Encoder שלך לכאן) ---
+def get_padding_for_dilation(kernel_size, dilation):
+    return (kernel_size - 1) * dilation // 2
 
-# Define edges (arrows)
-dot.edge('A', 'B')
-dot.edge('B', 'C')
-dot.edge('C', 'D')
-dot.edge('D', 'E')
-dot.edge('E', 'F')
-dot.edge('F', 'G')
-dot.edge('G', 'H')
+class DilatedConvEncoderA(nn.Module):
+    def __init__(self, input_channels=1, encoding_dim=ENCODING_DIM_AE, dropout_rate=AE_DROPOUT_RATE):
+        super().__init__()
+        # Conv Block 1
+        self.conv1 = nn.Conv1d(input_channels, 32, kernel_size=5, dilation=1, padding=get_padding_for_dilation(5,1))
+        self.norm1 = nn.GroupNorm(8, 32)
+        self.relu1 = nn.ReLU()
+        self.drop1 = nn.Dropout(dropout_rate)
+        # Conv Block 2
+        self.conv2 = nn.Conv1d(32, 64, kernel_size=5, dilation=2, padding=get_padding_for_dilation(5,2))
+        self.norm2 = nn.GroupNorm(8, 64)
+        self.relu2 = nn.ReLU()
+        self.drop2 = nn.Dropout(dropout_rate)
+        # Conv Block 3
+        self.conv3 = nn.Conv1d(64, 128, kernel_size=5, dilation=4, padding=get_padding_for_dilation(5,4))
+        self.norm3 = nn.GroupNorm(16, 128)
+        self.relu3 = nn.ReLU()
+        self.drop3 = nn.Dropout(dropout_rate)
+        # Conv Block 4
+        self.conv4 = nn.Conv1d(128, 256, kernel_size=5, dilation=8, padding=get_padding_for_dilation(5,8))
+        self.norm4 = nn.GroupNorm(16, 256)
+        self.relu4 = nn.ReLU()
+        self.drop4 = nn.Dropout(dropout_rate)
 
-# (אופציונלי: להוסיף חצים קטנים ל-Skip Connections אם רוצים)
-# dot.edge('B', 'Decoder_Input_Skip1', style='dashed', arrowhead='none', constraint='false') # דוגמה
-# dot.edge('C', 'Decoder_Input_Skip2', style='dashed', arrowhead='none', constraint='false')
-# dot.edge('D', 'Decoder_Input_Skip3', style='dashed', arrowhead='none', constraint='false')
-# dot.edge('E', 'Decoder_Input_Skip4', style='dashed', arrowhead='none', constraint='false')
+        self.adaptive_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc_encoded = nn.Linear(256, encoding_dim)
 
+    def forward(self, x):
+        # שים לב: הפונקציה forward המלאה מחזירה גם skips.
+        # לצורך summary, נתעלם מה-skips כרגע, כי summary מתמקדת בזרימה העיקרית.
+        x = self.drop1(self.relu1(self.norm1(self.conv1(x))))
+        x = self.drop2(self.relu2(self.norm2(self.conv2(x))))
+        x = self.drop3(self.relu3(self.norm3(self.conv3(x))))
+        x = self.drop4(self.relu4(self.norm4(self.conv4(x))))
+        pooled = self.adaptive_pool(x)
+        # צריך להסיר את המימד האחרון לפני ה-Linear אם הוא 1
+        # pooled = pooled.squeeze(-1) # אם adaptive_pool מחזיר (batch, channels, 1)
+        # או לשטח לפני ה-Linear אם הפלט מה-adaptive_pool אינו וקטור לכל דגימה
+        pooled = pooled.view(pooled.size(0), -1) # Flatten
+        encoded = self.fc_encoded(pooled)
+        # return encoded, (s1, s2, s3, s4) # במקור
+        return encoded # לטובת summary פשוט יותר
 
-# Render and save the diagram
-# הפלט יהיה קובץ PDF (או פורמט אחר שתבחר) בשם 'encoder_architecture.gv.pdf'
-# וגם קובץ מקור בשפת DOT בשם 'encoder_architecture.gv'
+# יצירת מופע של המודל
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+encoder_model = DilatedConvEncoderA(input_channels=1, encoding_dim=ENCODING_DIM_AE, dropout_rate=AE_DROPOUT_RATE).to(device)
+
+# הדפסת הסיכום
+# הקלט צריך להיות (מספר ערוצים, אורך הרצף)
 try:
-    dot.render('encoder_architecture', view=True) # view=True ינסה לפתוח את הקובץ שנוצר
-    print("Diagram 'encoder_architecture.gv.pdf' created successfully.")
+    print("Encoder Architecture Summary (using torch-summary):")
+    summary(encoder_model, input_size=(1, SEQUENCE_LENGTH))
 except Exception as e:
-    print(f"Error rendering diagram: {e}")
-    print("Please ensure Graphviz is installed and in your system's PATH.")
-    print("You can install it from https://graphviz.org/download/")
-    print("On Debian/Ubuntu: sudo apt-get install graphviz")
-    print("On macOS (with Homebrew): brew install graphviz")
+    print(f"Error using torch-summary: {e}")
+    print("Make sure torch-summary is installed: pip install torch-summary")
