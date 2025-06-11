@@ -1,90 +1,152 @@
-# Geophone Event Classification using PyTorch CNN with Attention
+<!-- Paste this into your GitHub README.md as an HTML block -->
+<h1>Background Noise Classification, Human &amp; Vehicle Detection in Noisy Environments</h1>
 
-[![Python Version](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Framework](https://img.shields.io/badge/Framework-PyTorch-EE4C2C.svg)](https://pytorch.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) 
-[![Collaboration](https://img.shields.io/badge/Collaboration-Elbit%20Systems%20Context-orange.svg)](https://elbitsystems.com)
-
----
-
-## 📜 Overview
-
-This project presents an end-to-end pipeline for classifying events (e.g., 'human', 'car', 'nothing') based on time-series data collected from geophone sensors. Utilizing **PyTorch**, the core of the solution is a custom **Convolutional Neural Network (CNN)** enhanced with a **Spatial Attention mechanism**. The pipeline handles raw signal processing, feature extraction via **Log Power Spectrograms**, advanced data augmentation, model training, and evaluation, achieving high classification accuracy even in potentially noisy environments.
-
----
-
-## ✨ Key Features & Highlights
-
-*   **Custom PyTorch CNN Architecture:** Features multiple convolutional blocks with BatchNorm, ReLU, and MaxPool, tailored for spectrogram analysis.
-*   **Spatial Attention Mechanism:** Allows the model to focus on the most informative time-frequency regions within the spectrograms, boosting performance.
-*   **Log Power Spectrogram Features:** Transforms raw time-series signals into a rich 2D representation using STFT (`scipy.signal`), suitable for CNNs.
-*   **Advanced Data Augmentation:**
-    *   Basic time-domain augmentation (noise, shift, scale).
-    *   **SpecAugment** applied on-the-fly during training (frequency/time masking, noise, shifts, cutout) via a custom PyTorch Dataset/DataLoader for enhanced robustness.
-*   **Intelligent Channel Selection:** Utilizes Cross-Correlation analysis to identify and discard noisy or unreliable sensor channels before feature extraction.
-*   **High Classification Accuracy:** Achieved **92.9%** overall accuracy on the held-out test set. *(See Results section for details)*
-*   **End-to-End Pipeline:** Covers data loading, robust preprocessing, feature engineering, efficient training loop (with AdamW, LR scheduling, Early Stopping), and detailed evaluation.
-
----
-
-## 🛠️ Tech Stack
-
-*   **Language:** Python (3.8+)
-*   **Core ML Framework:** PyTorch
-*   **Signal Processing:** SciPy (`signal` module for STFT, correlation), NumPy
-*   **Data Handling:** Pandas
-*   **ML Utilities:** Scikit-learn (for `train_test_split`, `LabelEncoder`, `classification_report`, `confusion_matrix`)
-*   **Visualization:** Matplotlib, Seaborn
-*   **Environment:** Jupyter Notebooks (likely used for experimentation/analysis)
-
----
-
-## 📊 Pipeline Workflow
-
-1.  **Data Loading & Organization:** Loading raw signal CSVs, handling exceptions (corrupted files), parsing labels from filenames.
-2.  **Channel Quality Analysis:** Performing Cross-Correlation between channels (especially vs. 'nothing' signals) and variance analysis to identify and select reliable sensor channels.
-3.  **Signal Windowing & Augmentation (Time-Domain):** Segmenting signals into overlapping windows and applying basic time-domain augmentations.
-4.  **Feature Engineering (Spectrograms):** Generating Log Power Spectrograms for each window using STFT.
-5.  **Data Preparation (PyTorch):**
-    *   Label Encoding.
-    *   Reshaping spectrograms for CNN input (B, C, H, W).
-    *   Splitting into stratified Train/Validation/Test sets.
-    *   Creating custom `Dataset` & `DataLoader` with **on-the-fly SpecAugment** for training batches.
-6.  **CNN Model Development:** Defining the custom CNN architecture with Spatial Attention in PyTorch.
-7.  **Training & Optimization:**
-    *   Using `CrossEntropyLoss` and `AdamW` optimizer.
-    *   Implementing `ReduceLROnPlateau` learning rate scheduler.
-    *   Implementing `EarlyStopping` based on validation accuracy.
-    *   Training loop with validation checks.
-8.  **Evaluation:** Assessing the best model on the Test set using Accuracy, Precision, Recall, F1-score (`classification_report`), and Confusion Matrix.
-9.  **Visualization:** Plotting training curves and the confusion matrix.
-
----
-
-## 📈 Results & Performance
-
-*   **Overall Test Accuracy:** **92.88%**
-*   **Class-wise Performance (Test Set):**
-
-    ```
-                  precision    recall  f1-score   support
-
-             car       0.98      0.96      0.97       931
-           human       0.93      0.91      0.92      1599
-         nothing       0.90      0.93      0.91      1669
-
-        accuracy                           0.93      4199
-       macro avg       0.94      0.93      0.94      4199
-    weighted avg       0.93      0.93      0.93      4199
-    ```
-
-*   **Confusion Matrix (Test Set):**
-
-    ![Test Confusion Matrix](confmatrix.png) 
+<p>
+  <a href="https://www.python.org/downloads/release/python-390/">
+    <img src="https://img.shields.io/badge/python-3.9-blue.svg" alt="Python 3.9" />
+  </a>
+  <a href="https://pytorch.org/">
+    <img src="https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=flat&amp;logo=PyTorch&amp;logoColor=white" alt="PyTorch" />
+  </a>
+  <a href="https://opensource.org/licenses/MIT">
+    <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" />
+  </a>
+</p>
 
 
----
 
-<p align="center">
-  <i>Leveraging Deep Learning and Signal Processing for Accurate Geophone Event Classification.</i>
+<hr />
+
+<h2>📖 Project Overview</h2>
+<p>
+  This project explores an alternative dimension for surveillance and activity monitoring: the subtle vibrations of the ground itself. Traditional surveillance technologies often fail when faced with real-world challenges like obstructed lines of sight, adverse weather, or the need for covert operation.
+</p>
+<p>
+  This research demonstrates a robust deep-learning pipeline that uses <strong>geophone</strong> sensors to "listen" to ground vibrations and classify them into three distinct categories:
+</p>
+<ol>
+  <li><strong>Quiet</strong>: Baseline noise with no significant event.</li>
+  <li><strong>Vehicle</strong>: Vibrations caused by vehicular movement.</li>
+  <li><strong>Human</strong>: Vibrations generated by human footsteps or activity.</li>
+</ol>
+<p>
+  By leveraging a <strong>Dilated Convolutional Autoencoder (DCAE)</strong> for unsupervised feature learning, followed by a fine-tuned classifier, our model achieves high accuracy and reliability, proving the feasibility of seismic sensing as a primary or complementary method for covert, weather-independent detection.
+</p>
+
+<h2>✨ Key Features</h2>
+<ul>
+  <li><strong>End-to-End Pipeline</strong>: From raw geophone signals to final classification.</li>
+  <li><strong>Unsupervised Pre-training</strong>: Learns robust signal features from unlabeled data using a Dilated Convolutional Autoencoder (DCAE).</li>
+  <li><strong>Supervised Fine-Tuning</strong>: The pre-trained encoder is fine-tuned for the specific classification task.</li>
+  <li><strong>Advanced Data Augmentation</strong>: Noise addition, time shifting, amplitude scaling.</li>
+  <li><strong>High Performance</strong>: Final test accuracy of <strong>94.95%</strong>.</li>
+</ul>
+
+<h2>🛠️ The Method: A Multi-Stage Pipeline</h2>
+<ol>
+  <li>
+    <strong>Data Collection &amp; Preprocessing</strong><br>
+    Raw geophone signals (1 kHz sampling) → 0.5 s overlapping segments → normalization.
+  </li>
+  <li>
+    <strong>Unsupervised Representation Learning (DCAE)</strong><br>
+    Train Dilated Convolutional Autoencoder to reconstruct inputs, forcing the encoder to learn compact latent features.
+  </li>
+  <li>
+    <strong>Supervised Classifier Training</strong><br>
+    Attach a new classifier head to the pre-trained encoder and fine-tune on labeled data with augmentation.
+  </li>
+  <li>
+    <strong>Rigorous Evaluation</strong><br>
+    Assess on held-out test set for unbiased performance metrics.
+  </li>
+</ol>
+
+<h2>🧠 Model Architecture</h2>
+<h3>1. Dilated Convolutional Autoencoder (DCAE)</h3>
+<ul>
+  <li><strong>Encoder</strong>: Four blocks of 1D dilated convolutions → 64-dim latent space.</li>
+  <li><strong>Decoder</strong>: Reconstructs signal from latent code.</li>
+  <li><strong>Skip Connections</strong>: Preserve fine details (U-Net style).</li>
+</ul>
+
+<h3>2. Classifier with Fine-Tuned Encoder</h3>
+<ul>
+  <li><strong>Pre-trained Encoder</strong>: Weights unfrozen and fine-tuned.</li>
+  <li><strong>Classifier Head</strong>: MLP (Linear → BatchNorm → GELU → Dropout) → 3-class logits.</li>
+</ul>
+
+<h2>📊 Results and Discussion</h2>
+<p>The combination of fine-tuning and augmentation yields the best performance:</p>
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Configuration</th>
+      <th>Test Accuracy</th>
+      <th>Key Observation</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td>Baseline (No Augmentation, No Fine-tuning)</td>
+      <td>50.32%</td>
+      <td>Unstable, poor generalization.</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>Augmentation Only</td>
+      <td>77.08%</td>
+      <td>Better generalization, fixed features.</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>Fine-Tuned Encoder Only</td>
+      <td>92.38%</td>
+      <td>High precision, stable learning.</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td>Final Model (Fine-Tuned + Augmentation)</td>
+      <td><strong>94.95%</strong></td>
+      <td>Best overall, minimal false alarms.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>🚀 How to Run</h2>
+<ol>
+  <li>
+    <strong>Clone the repo:</strong><br>
+    <code>git clone https://github.com/your-username/your-repo-name.git</code>
+  </li>
+  <li>
+    <strong>Install deps:</strong><br>
+    <code>python -m venv venv<br>
+    source venv/bin/activate  # Windows: venv\Scripts\activate<br>
+    pip install -r requirements.txt</code>
+  </li>
+  <li>
+    <strong>Prepare data:</strong><br>
+    Place raw <code>.csv</code> files in <code>data/</code>.
+  </li>
+  <li>
+    <strong>Run training &amp; evaluation:</strong><br>
+    <code>python main.py</code>
+  </li>
+</ol>
+
+<h2>💻 Technologies Used</h2>
+<p>
+  <img src="https://raw.githubusercontent.com/devicons/devicon/master/icons/python/python-original.svg" alt="python" width="40" height="40" />
+  <img src="https://raw.githubusercontent.com/devicons/devicon/master/icons/pytorch/pytorch-original.svg" alt="pytorch" width="40" height="40" />
+  <img src="https://raw.githubusercontent.com/devicons/devicon/master/icons/numpy/numpy-original.svg" alt="numpy" width="40" height="40" />
+  <img src="https://raw.githubusercontent.com/devicons/devicon/master/icons/pandas/pandas-original.svg" alt="pandas" width="40" height="40" />
+  <img src="https://upload.wikimedia.org/wikipedia/commons/0/05/Scikit_learn_logo_small.svg" alt="scikit-learn" width="40" height="40" />
+</p>
+
+<h2>🏁 Conclusion</h2>
+<p>
+  A hybrid Dilated Convolutional Autoencoder + fine-tuning approach achieves 94.95% accuracy on seismic geophone signal classification, demonstrating the promise of seismic sensing for security, infrastructure monitoring, and environmental applications. Future extensions may include more classes, edge-device deployment, and transformer-based enhancements.
 </p>
